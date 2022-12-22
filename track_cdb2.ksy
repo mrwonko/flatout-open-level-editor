@@ -6,6 +6,7 @@ meta:
 seq:
 - id: header
   type: header
+  size: 64
 - id: nodes
   type: nodes
   size: header.ofs_indices - 64
