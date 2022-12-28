@@ -3,7 +3,7 @@ import io
 import mathutils
 import os
 import struct
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TypeVar, Union
 
 bl_info = {
     "name": "track_cdb2 format",
@@ -17,12 +17,35 @@ VERSION = 0
 HEADER_SIZE = 64
 NODE_SIZE = 8
 ONLY_EDGES = False
+TEST_BITMASK = True
+DUMP_VERTICES = True
+VERIFY_REACHABILITY = True
+CHECK_BOUNDS = True
 COLOR_SHALLOW = mathutils.Color((0xD0/0xFF, 0x00/0xFF, 0x70/0xFF))
 COLOR_DEEP = mathutils.Color((0x00/0xFF, 0x32/0xFF, 0xA0/0xFF))
 
 def color_lerp(f: float, c1: mathutils.Color, c2: mathutils.Color) -> mathutils.Color:
     """Linear interpolation between c1 (f=0) and c2 (f=1)"""
     return (c1 * (1.0-f)) + (c2 * f)
+
+T = TypeVar('T')
+
+def y_up_to_z_up(vert: List[T]) -> List[T]:
+    """
+    convert from file format coordinates (Y-axis is up)
+    to Blender coordinates (Z-axis is up)
+    """
+    return [
+        vert[0],
+        vert[2],
+        -vert[1],
+    ]
+
+def scale_to_blender(vert: Union[Tuple[int, int, int], List[int]], multipliers: List[float]) -> List[float]:
+    """
+    convert from file format AABB scale (int16) to Blender coordinates
+    """
+    return [e*m for e, m in zip(vert, multipliers)]
 
 class AABB:
     def __init__(self, min: mathutils.Vector, max: mathutils.Vector) -> None:
@@ -32,41 +55,93 @@ class AABB:
     def copy(self) -> "AABB":
         return AABB(self.min.copy(), self.max.copy())
 
+def ones(n: int) -> int:
+    """Returns a bitmask where the lowest n bits are 1."""
+    return (1<<n)-1
+
 class Node:
     def __init__(self, data: bytes) -> None:
-        assert(len(data) == NODE_SIZE)
-        self._lo: int
-        self._lo, = struct.unpack("I", data[:4])
+        assert len(data) == NODE_SIZE, f'expected {NODE_SIZE} bytes, not {len(data)}'
+        AXIS_BITS = 2
+        # I'm not entirely sure if the nomenclature is correct here,
+        # but I'm calling the first dword lo(w) and the second one hi(gh)
+        lo: int
+        lo, = struct.unpack("I", data[:4])
+        self.axis = lo & ones(AXIS_BITS)
+        lo >>= AXIS_BITS
+        # if we generated a debug visualisation, this is the node's parent.
+        # use it to generate 
+        self.debug_parent: Optional[bpy.types.Object] = None
         if self.is_leaf:
-            self._hi: int
-            self._hi, = struct.unpack("I", data[4:])
+            # 23b triangle start, 3b kind, 4b mask, 2b axis (=3)
+            MASK_BITS = 4
+            KIND_BITS = 3
+            # 19b vertex offset, 6b flags, 7b triangle count
+            COUNT_BITS = 7
+            FLAGS_BITS = 6
+
+            self.bitmask = lo & ones(MASK_BITS)
+            lo >>= MASK_BITS
+            self._kind = lo & ones(KIND_BITS)
+            lo >>= KIND_BITS
+            self._triangle_offset = lo
+            hi: int
+            hi, = struct.unpack("I", data[4:])
+            self._num_triangles = hi & ones(COUNT_BITS)
+            hi >>= COUNT_BITS
+            self._flags = hi & ones(FLAGS_BITS)
+            hi >>= FLAGS_BITS
+            self._vert_offset = hi
         else:
+            # 24b child offset, 6b mask, 2b axis
+            MASK_BITS = 6
+            # 16b max, 16b min
+
+            # I suspect that in practice, this is still <= 4 bit,
+            # like for leafs, but the engine can also handle more
+            self.bitmask = lo & ones(MASK_BITS)
+            lo >>= MASK_BITS
+            child0_offset = lo
+            assert child0_offset % NODE_SIZE == 0, f'unexpected node offset {child0_offset} is not a multiple of {NODE_SIZE}'
+            self._child0_index = child0_offset // NODE_SIZE
             self._max: int
             self._min: int
             self._max, self._min = struct.unpack("2h", data[4:])
 
     @property
-    def axis(self) -> int:
-        """0-3, where 3=leaf"""
-        return (self._lo & ((1<<2)-1))
-    @property
     def is_leaf(self) -> bool:
+        """Axis 0-2 are inner nodes, axis 3 marks leafs."""
         return self.axis == 3
     @property
     def children(self) -> Tuple[int, int]:
         """Only for non-leafs: indices of child nodes"""
-        assert(not self.is_leaf)
-        offset = self._lo >> 8
-        index = offset // NODE_SIZE
-        return index, index+1
+        assert not self.is_leaf, 'leafs have no children'
+        return self._child0_index, self._child0_index+1
     @property
-    def num_primitives(self) -> int:
-        assert(self.is_leaf)
-        return self._hi & ((1<<7)-1)
+    def num_triangles(self) -> int:
+        """Only for leafs: number of triangles contained"""
+        assert self.is_leaf, 'only leafs have triangles'
+        return self._num_triangles
+    @property
+    def triangle_offset(self) -> int:
+        assert self.is_leaf, 'only leafs have triangles'
+        return self._triangle_offset
     @property
     def leaf_kind(self) -> int:
-        assert(self.is_leaf)
-        return (self._lo >> 6) & ((1<<3)-1)
+        assert self.is_leaf, 'only leafs have kinds'
+        return self._kind
+    @property
+    def leaf_flags(self) -> int:
+        assert self.is_leaf, 'only leafs have flags'
+        return self._flags
+    @property
+    def vert_offset(self) -> int:
+        '''
+        Only for leafs: fixed offset into the vertex buffer.
+        Depending on the leaf_kind, this is only applied to some vertices.
+        '''
+        assert self.is_leaf, 'only leafs have vertex offset'
+        return self._vert_offset
     @property
     def max(self) -> int:
         """
@@ -74,7 +149,7 @@ class Node:
         This is the first of those words: the upper bound of this axis range.
         Do not call on leafs.
         """
-        assert(not self.is_leaf)
+        assert not self.is_leaf, 'leafs have no maximum'
         return self._max
     @property
     def min(self) -> int:
@@ -83,8 +158,14 @@ class Node:
         This is the second of those words: the lower bound of this axis range.
         Do not call on leafs.
         """
-        assert(not self.is_leaf)
+        assert not self.is_leaf, 'leafs have no minimum'
         return self._min
+
+class Triangle:
+    def __init__(self, flags: int, vert_indices: Tuple[int, int, int]) -> None:
+        # the low 6 bit are the node flags, the rest are triangle-specificä
+        self.flags = flags
+        self.vert_indices = vert_indices
 
 def import_file(filename: str, enable_debug_visualization: bool = False):
     file_stats = os.stat(filename)
@@ -105,8 +186,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         maxs = struct.unpack("<3i", f.read(3*4))
         # conversion from the scaled short-coordinates used in the aabb-tree
         # to the float game coordinates matching the visuals
-        # this appears to be the inverse (1/x) of the axis_multipliers below
-        # (though which of the two is the inverse is up for debate...)
+        # this appears to be the inverse (1/x) of the multipliers below
         axis_multipliers = struct.unpack("<3f", f.read(3*4))
         # incoming game coordinates get multiplied by this,
         # it's the inverse of the axis_multipliers above.
@@ -121,46 +201,63 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         #   nobody ever tested that.
         inverse_axis_multipliers = struct.unpack("<3f", f.read(3*4))
         ofs_tree = HEADER_SIZE
-        ofs_indices: int
-        ofs_primitives: int
-        ofs_indices, ofs_primitives = struct.unpack("<2I", f.read(2*4))
+        ofs_triangles: int
+        ofs_vertices: int
+        ofs_triangles, ofs_vertices = struct.unpack("<2I", f.read(2*4))
+        print(f"{ofs_vertices=} {file_size=}")
         # offsets are relative to end of the header
-        ofs_indices += HEADER_SIZE
-        ofs_primitives += HEADER_SIZE
+        ofs_triangles += HEADER_SIZE
+        ofs_vertices += HEADER_SIZE
 
-        len_tree = ofs_indices - ofs_tree
-        len_indices = ofs_primitives - ofs_indices
-        len_primitives = file_size - ofs_primitives
+        len_tree = ofs_triangles - ofs_tree
+        len_triangles = ofs_vertices - ofs_triangles
+        len_vertices = file_size - ofs_vertices
         assert(f.tell() == ofs_tree)
 
         # Tree
         nodes: List[Node] = []
-        while f.tell() + NODE_SIZE <= ofs_indices:
+        seen_flags: int = 0
+        kind_counts: Dict[int, int] = {}
+        while f.tell() + NODE_SIZE <= ofs_triangles:
             node = Node(f.read(NODE_SIZE))
-            if not node.is_leaf:
+            if node.is_leaf:
+                kind_counts[node.leaf_kind] = kind_counts.get(node.leaf_kind, 0) + 1
+            else:
                 assert (node.children[0] + 1) * NODE_SIZE <= len_tree, f"leaf {len(nodes)} first child {node.children[0]} out of range {len_tree//NODE_SIZE}"
                 assert (node.children[1] + 1) * NODE_SIZE <= len_tree, f"leaf {len(nodes)} second child {node.children[1]} out of range {len_tree//NODE_SIZE}"
             nodes.append(node)
+            seen_flags |= node.bitmask
 
-        print(f"""file info:
-{mins=}
-{maxs=}
-{inverse_axis_multipliers=}
-{axis_multipliers=}
-{ofs_tree=}
-{len_tree=}
-{ofs_indices=}
-{len_indices=}
-{ofs_primitives=}
-{len_primitives=}
-{file_size=}
-{len(nodes)=}
+        if TEST_BITMASK:
+            # the assumption is that this bitmask is inherited upwards:
+            # a node knows whether a certain type of triangle is inside.
+            # this check tests that assumption.
+            def check_tree_bitmasks(root_index: int, expected: int) -> None:
+                root = nodes[root_index]
+                assert root.bitmask & expected == root.bitmask, f"node {root_index} bitmask {root.bitmask:b} does not fit expected pattern {expected:b}"
+                if root.is_leaf:
+                    return
+                check_tree_bitmasks(root.children[0], root.bitmask)
+                check_tree_bitmasks(root.children[1], root.bitmask)
+            check_tree_bitmasks(0, (1<<32)-1)
 
-{enable_debug_visualization=}
-""")
+        if VERIFY_REACHABILITY:
+            # the tree should not contain any orphan nodes, presumably
+            reachable = [False] * len(nodes)
+            def check_reachability(root_index: int) -> None:
+                reachable[root_index] = True
+                root = nodes[root_index]
+                if root.is_leaf:
+                    return
+                check_reachability(root.children[0])
+                check_reachability(root.children[1])
+            check_reachability(0)
+            unreachable = [i for i, r in enumerate(reachable) if not r]
+            assert len(unreachable) == 0, 'found {len(unreachable)} orphan node(s), first ten: {unreachable[:10]}'
+
+        collision_collection = bpy.data.collections.new('collision')
+        bpy.context.scene.collection.children.link(collision_collection)
         if enable_debug_visualization:
-            debug_collection = bpy.data.collections.new('debug_collection')
-            bpy.context.scene.collection.children.link(debug_collection)
 
             def depth(node: Node) -> int:
                 if node.is_leaf:
@@ -175,6 +272,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                     return
 
                 node = nodes[node_index]
+                node.debug_parent = parent
                 if node.is_leaf:
                     # We could visualise the final bounds here,
                     # but it would be redundant?
@@ -207,10 +305,13 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                     [maxs[0], maxs[1], maxs[2]],
                     [maxs[0], mins[1], maxs[2]],
                 ]
-                # FIXME: every level seems to have a different rotation
                 # rotate vertices to correct axis
-                # verts = [vert[axis:] + vert[:axis] for vert in verts]
-                verts = [vert[-axis:] + vert[:-axis] for vert in verts]
+                verts = map(lambda vert: vert[-axis:] + vert[:-axis], verts)
+                # apply scale & adjust axis
+                verts = [
+                    y_up_to_z_up(scale_to_blender(v, axis_multipliers))
+                    for v in verts
+                ]
                 edges = [
                     (0, 1), (1, 2), (2, 3), (3, 0),
                     (4, 5), (5, 6), (6, 7), (7, 4),
@@ -227,17 +328,19 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                 mesh_inside.from_pydata(verts, edges, faces)
                 mesh_inside.update()
                 obj_inside: bpy.types.Object = bpy.data.objects.new(f"node{node_index}_inside", mesh_inside)
+                obj_inside.display_type = "WIRE"
                 obj_inside.color = color[:]+(1.0,)
-                debug_collection.objects.link(obj_inside)
+                collision_collection.objects.link(obj_inside)
 
                 obj_outside: bpy.types.Object = bpy.data.objects.new(f"node{node_index}_outside", None)
+                obj_outside.display_type = "WIRE"
                 obj_outside.color = color[:]+(1.0,)
-                debug_collection.objects.link(obj_outside)
+                collision_collection.objects.link(obj_outside)
 
                 if parent is not None:
                     obj_inside.parent = parent
                     obj_outside.parent = parent
-                print(f"generated {node_index=}")
+                # print(f"generated {node_index=}")
                 generate_debug_visualization(
                     bounds=inside_bounds,
                     node_index=inside_child,
@@ -258,12 +361,132 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                 parent=None,
             )
 
-        # apparently, the maximum referenced child is 8*num_nodes, which constitutes an off-by-one error?!? nevermind, the offset is excluding the header.
+        # Triangles
+        # This chunk of data contains per-triangle flags
+        # and the indices of the relevant vertices
+        # packed into individual bits in various ways
+        assert f.tell() == ofs_triangles
+        triangle_data = f.read(len_triangles)
 
-        # Indices
-        assert(f.tell() == ofs_indices)
+        # Vertex coordinates
+        assert f.tell() == ofs_vertices
+        if False:
+            vertex_coords = [
+                y_up_to_z_up(
+                    scale_to_blender(
+                        struct.unpack("3h", f.read(3*2)),
+                        axis_multipliers,
+                    ),
+                )
+                for i in range(0, len_vertices, 3*2)
+            ]
+            if DUMP_VERTICES:
+                verts_mesh: bpy.types.Mesh = bpy.data.meshes.new(f"onlyverts")
+                verts_mesh.from_pydata(vertex_coords, (), ())
+                verts_mesh.update()
+                verts_obj: bpy.types.Object = bpy.data.objects.new(f"onlyverts", verts_mesh)
+                collision_collection.objects.link(verts_obj)
+        else:
+            vertex_coords = [
+                struct.unpack("h", f.read(2))[0]
+                for i in range(0, len_vertices, 2)
+            ]
+            # if coordinates are not triplets, there's no way to dump them here
 
-        # Primitives
+
+        if CHECK_BOUNDS:
+            for node_index, node in enumerate(nodes):
+                if node.is_leaf:
+                    assert node.triangle_offset < len(triangle_data), f"node {node_index} triangle_offset {node.triangle_offset} is out of range [0, {len(triangle_data)}]"
+                    assert node.vert_offset < len(vertex_coords), f"node {node_index} vert_offset {node.vert_offset} is out of range [0, {len(vertex_coords)}]"
+                else:
+                    assert node.children[0] >= 0, f"node {node_index} inner child index {node.children[0]} is negative"
+                    assert node.children[1] < len(nodes), f"node {node_index} outer child index {node.children[1]} is above {len(nodes)}"
+
+        # at this point, we're done reading from the file
+
+    # now that we have all necessary data in memory, we can build the geometry
+    for (node_index, node) in enumerate(nodes):
+        if not node.is_leaf:
+            continue
+        triangles: List[Triangle] = []
+        vert_offset = node.vert_offset
+        iter = node.triangle_offset
+        
+        if node.leaf_kind == 2:
+            for i in range(node.num_triangles):
+                tri = Triangle(
+                    flags=(triangle_data[iter+1] & ones(6)) | (triangle_data[iter] & ones(6)) << 8 | (triangle_data[iter] >> 6) << 16,
+                    vert_indices=(
+                        vert_offset + triangle_data[iter+2],
+                        vert_offset + triangle_data[iter+3],
+                        vert_offset + triangle_data[iter+4],
+                    ),
+                )
+                triangles.append(tri)
+                iter += 5
+        # TODO: other kinds
+        if len(triangles) > 0:
+            # Blender uses per-object vertex buffers,
+            # so we copy the relevant vertices to our own buffer
+            mapped_verts: List[List[float]] = []
+            index_mapping: Dict[int, int] = {}
+            def map_index(idx: int) -> int:
+                if idx in index_mapping:
+                    return index_mapping[idx]
+                assert idx < len(vertex_coords), f"vertex index {idx} out of range, there are {len(vertex_coords)} vertices totalling {len_vertices} bytes"
+                mapping = len(mapped_verts)
+                # TODO simplify the vertex handling
+                # it's confusing that we treat vertices as individual scalars up to here
+                mapped_verts.append(
+                    y_up_to_z_up(
+                        scale_to_blender(
+                            (
+                                vertex_coords[idx],
+                                vertex_coords[idx+1],
+                                vertex_coords[idx+2],
+                            ),
+                            axis_multipliers,
+                        ),
+                    ),
+                )
+                index_mapping[idx] = mapping
+                return mapping
+            mapped_tris = [
+                [map_index(idx) for idx in tri.vert_indices]
+                for tri in triangles
+            ]
+
+            mesh: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}")
+            mesh.from_pydata(
+                mapped_verts,
+                (),
+                mapped_tris,
+            )
+            mesh.update()
+            obj: bpy.types.Object = bpy.data.objects.new(f"node{node_index}", mesh)
+            collision_collection.objects.link(obj)
+            if node.debug_parent is not None:
+                obj.parent = node.debug_parent
+
+    print(f"""file info:
+{mins=}
+{maxs=}
+{inverse_axis_multipliers=}
+{axis_multipliers=}
+{ofs_tree=}
+{len_tree=}
+{ofs_triangles=}
+{len_triangles=}
+{ofs_vertices=}
+{len_vertices=}
+{file_size=}
+{len(nodes)=}
+seen_flags={seen_flags:b}
+{kind_counts=}
+
+{enable_debug_visualization=}
+""")
 
 class ImportOperator(bpy.types.Operator):
     bl_idname = "import_scene.fo2_track_cbd2_gen"
