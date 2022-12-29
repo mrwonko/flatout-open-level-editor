@@ -229,6 +229,7 @@ class Node:
         return self._kind
     @property
     def leaf_flags(self) -> int:
+        """Only for leafs: the 6 flag bits."""
         assert self.is_leaf, 'only leafs have flags'
         return self._flags
     @property
@@ -263,6 +264,10 @@ class Triangle:
     # the low 6 bit are the node flags, the rest are triangle-specific
     flags: int
     vert_indices: Tuple[int, int, int]
+
+    def check_bounds(self, node_index: int, len_vert_coords: int) -> None:
+        for axis, idx in enumerate(self.vert_indices):
+            assert idx+2 < len_vert_coords, f"node {node_index} axis {axis} vertex index {idx} out of range (max {len_vert_coords-2})"
 
 def test_bitmask(nodes: List[Node]) -> None:
     """
@@ -538,17 +543,45 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         vert_offset = node.vert_offset
         iter = node.triangle_offset
 
-        if node.leaf_kind == 2:
-            for i in range(node.num_triangles):
-                tri = Triangle(
-                    flags=(triangle_data[iter+1] & ones(6)) | (triangle_data[iter] & ones(6)) << 8 | (triangle_data[iter] >> 6) << 16,
+        if node.leaf_kind == 0:
+            # until I can figure out why I get out-of-bounds vertex indices here, I'm skipping the first triangle
+            if False:
+                triangles.append(Triangle(
+                    flags=node.leaf_flags | (triangle_data[iter] & ones(6)) << 8 | (triangle_data[iter] >> 6) << 8+8,
                     vert_indices=(
+                        vert_offset,
+                        # FIXME this is out of bounds?!
+                        triangle_data[iter+1] | triangle_data[iter+2] << 8 | (triangle_data[iter+3] & ones(3)) << 8+8,
+                        triangle_data[iter+3] >> 3 | triangle_data[iter+4] << 5 | triangle_data[iter+5] << 5+8,
+                    ),
+                ))
+                triangles[-1].check_bounds(node_index, len(vertex_coords))
+            iter += 6
+            # 0th triangle (above) is unconditional, start loop at 1st
+            for i in range(1, node.num_triangles):
+                triangles.append(Triangle(
+                    flags=(triangle_data[iter+1] & ones(6)) | (triangle_data[iter] & ones(6)) << 8 | (triangle_data[iter] >> 6) << 8+8,
+                    vert_indices=(
+                        triangle_data[iter+1] >> 7 | triangle_data[iter+2] << 1 | triangle_data[iter+3] << 1+8 | (triangle_data[iter+4] & ones(2)) << 1+8+8,
+                        triangle_data[iter+4] >> 2 | triangle_data[iter+5] << 6 | (triangle_data[iter+6] & ones(5)) << 6+8,
+                        triangle_data[iter+6] >> 5 | triangle_data[iter+7] << 3 | triangle_data[iter+8] << 3+8,
+                    ),
+                ))
+                triangles[-1].check_bounds(node_index, len(vertex_coords))
+                iter += 9
+        elif node.leaf_kind == 2:
+            for i in range(node.num_triangles):
+                triangles.append(Triangle(
+                    flags=(triangle_data[iter+1] & ones(6)) | (triangle_data[iter] & ones(6)) << 8 | (triangle_data[iter] >> 6) << 8+8,
+                    vert_indices=(
+                        # because we only use a single byte of triangle data,
+                        # we can only reference a range of 256 consecutive vertices
                         vert_offset + triangle_data[iter+2],
                         vert_offset + triangle_data[iter+3],
                         vert_offset + triangle_data[iter+4],
                     ),
-                )
-                triangles.append(tri)
+                ))
+                triangles[-1].check_bounds(node_index, len(vertex_coords))
                 iter += 5
         # TODO: other kinds
         if len(triangles) > 0:
