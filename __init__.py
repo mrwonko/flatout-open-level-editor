@@ -1,5 +1,6 @@
 import bpy
 import io
+from dataclasses import dataclass
 import mathutils
 import os
 import struct
@@ -24,6 +25,100 @@ CHECK_BOUNDS = True
 COLOR_SHALLOW = mathutils.Color((0xD0/0xFF, 0x00/0xFF, 0x70/0xFF))
 COLOR_DEEP = mathutils.Color((0x00/0xFF, 0x32/0xFF, 0xA0/0xFF))
 
+@dataclass
+class Header:
+    # magic FILE_ID bytes
+    file_id: bytes
+    version: int
+    # bounding box around the level, scaled by axis_multipliers
+    mins: Tuple[int, int, int]
+    maxs: Tuple[int, int, int]
+    # conversion from the scaled short-coordinates used in the aabb-tree
+    # to the float game coordinates matching the visuals
+    # this appears to be the inverse (1/x) of the multipliers below
+    axis_multipliers: Tuple[float, float, float]
+    # incoming game coordinates get multiplied by this,
+    # it's the inverse of the axis_multipliers above.
+    # These values are chosen such that the result is in [-32767, 32767]
+    # (the range of a signed short*, which is what the checks in the tree use)
+    # * technically, signed short also includes -32768,
+    #   but canal1/a still only goes down to -32767.
+    #   I appreciate the symmetry.
+    #   Simplifies the calculation, if only slightly.
+    #   Though I suspect the game would be able to handle -32768, too.
+    #   But let's not generate anything the original tracks don't use,
+    #   nobody ever tested that.
+    inverse_axis_multipliers: Tuple[float, float, float]
+    # offset in bytes after the end of the header to the packed triangle buffer.
+    # see ofs_triangles for absolute offset.
+    relative_ofs_triangles: int
+    # offset in bytes after the end of the header to the vertex coordinates.
+    # see ofs_vertices for absolute offset.
+    relative_ofs_vertices: int
+    # not part of the header itself, but related to the offsets above,
+    # so they're stored together.
+    file_size: int
+
+    @staticmethod
+    def from_reader(f: io.BufferedReader, file_size: int) -> "Header":
+        """
+        Parses the header from the given buffer.
+        Raises a ValueError if the data does not look like a track_cdb2.gen header,
+        or a struct.error if there is insufficient data in the reader.
+        Afterwards, the reader will be positioned after the header,
+        i.e. at the start of the AABB tree data.
+        """
+        assert f.tell() == 0, f"expected header at start of file, got offset {f.tell()}"
+        res = Header(
+            file_id=struct.unpack("<4s", f.read(4))[0],
+            version=struct.unpack("<i", f.read(4))[0],
+            mins=struct.unpack("<3i", f.read(3*4)),
+            maxs=struct.unpack("<3i", f.read(3*4)),
+            axis_multipliers=struct.unpack("<3f", f.read(3*4)),
+            inverse_axis_multipliers=struct.unpack("<3f", f.read(3*4)),
+            relative_ofs_triangles=struct.unpack("<I", f.read(4))[0],
+            relative_ofs_vertices=struct.unpack("<I", f.read(4))[0],
+            file_size=file_size,
+        )
+        assert f.tell() == HEADER_SIZE, f"should have consumed {HEADER_SIZE} bytes after header, not {f.tell()}"
+        if res.file_id != FILE_ID:
+            raise ValueError(f'bad magic header, want {FILE_ID}, got {res.file_id}')
+        if res.version != VERSION:
+            # note that I'm not 100% certain this is a version number,
+            # but it's always 0 in my experience.
+            raise ValueError(f'bad file version, want {VERSION}, got {res.version}')
+        # if this ever happens, len_triangles and len_vertices need to be adjusted.
+        assert res.relative_ofs_triangles <= res.relative_ofs_vertices, "this importer assumes the triangle data comes before the vertex data and needs to be adjusted to support this file"
+        return res
+
+    @property
+    def ofs_tree(self) -> int:
+        """Offset in the reader where the AABB tree data starts"""
+        return HEADER_SIZE
+    @property
+    def ofs_triangles(self) -> int:
+        """Offset in the reader where the packed triangle data starts."""
+        return self.relative_ofs_triangles + HEADER_SIZE
+    @property
+    def ofs_vertices(self) -> int:
+        """Offset in the reader where the vertex coordinate data starts."""
+        return self.relative_ofs_vertices + HEADER_SIZE
+    @property
+    def len_tree(self) -> int:
+        """Size of the AABB tree data in bytes."""
+        # assumes triangles come directly after the tree
+        return self.ofs_triangles - self.ofs_tree
+    @property
+    def len_triangles(self) -> int:
+        """Size of the triangle data in bytes."""
+        # assumes vertices come directly after the triangles
+        return self.ofs_vertices - self.ofs_triangles
+    @property
+    def len_vertices(self) -> int:
+        """Size of the vertex data in bytes."""
+        # assumes vertices continue until the end of the file
+        return self.file_size - self.ofs_vertices
+
 def color_lerp(f: float, c1: mathutils.Color, c2: mathutils.Color) -> mathutils.Color:
     """Linear interpolation between c1 (f=0) and c2 (f=1)"""
     return (c1 * (1.0-f)) + (c2 * f)
@@ -47,11 +142,11 @@ def scale_to_blender(vert: Union[Tuple[int, int, int], List[int]], multipliers: 
     """
     return [e*m for e, m in zip(vert, multipliers)]
 
+@dataclass
 class AABB:
-    def __init__(self, min: mathutils.Vector, max: mathutils.Vector) -> None:
-        self.min = min
-        self.max = max
-    
+    min: mathutils.Vector
+    max: mathutils.Vector
+
     def copy(self) -> "AABB":
         return AABB(self.min.copy(), self.max.copy())
 
@@ -60,17 +155,17 @@ def ones(n: int) -> int:
     return (1<<n)-1
 
 class Node:
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, index: int, header: Header) -> None:
         assert len(data) == NODE_SIZE, f'expected {NODE_SIZE} bytes, not {len(data)}'
         AXIS_BITS = 2
         # I'm not entirely sure if the nomenclature is correct here,
         # but I'm calling the first dword lo(w) and the second one hi(gh)
         lo: int
-        lo, = struct.unpack("I", data[:4])
+        lo, = struct.unpack("<I", data[:4])
         self.axis = lo & ones(AXIS_BITS)
         lo >>= AXIS_BITS
         # if we generated a debug visualisation, this is the node's parent.
-        # use it to generate 
+        # attach collision geometry to the same parent.
         self.debug_parent: Optional[bpy.types.Object] = None
         if self.is_leaf:
             # 23b triangle start, 3b kind, 4b mask, 2b axis (=3)
@@ -86,7 +181,7 @@ class Node:
             lo >>= KIND_BITS
             self._triangle_offset = lo
             hi: int
-            hi, = struct.unpack("I", data[4:])
+            hi, = struct.unpack("<I", data[4:])
             self._num_triangles = hi & ones(COUNT_BITS)
             hi >>= COUNT_BITS
             self._flags = hi & ones(FLAGS_BITS)
@@ -106,7 +201,9 @@ class Node:
             self._child0_index = child0_offset // NODE_SIZE
             self._max: int
             self._min: int
-            self._max, self._min = struct.unpack("2h", data[4:])
+            self._max, self._min = struct.unpack("<2h", data[4:])
+            assert (self.children[0] + 1) * NODE_SIZE <= header.len_tree, f"leaf {index} first child {self.children[0]} out of range {header.len_tree//NODE_SIZE}"
+            assert (self.children[1] + 1) * NODE_SIZE <= header.len_tree, f"leaf {index} second child {self.children[1]} out of range {header.len_tree//NODE_SIZE}"
 
     @property
     def is_leaf(self) -> bool:
@@ -161,215 +258,206 @@ class Node:
         assert not self.is_leaf, 'leafs have no minimum'
         return self._min
 
+@dataclass
 class Triangle:
-    def __init__(self, flags: int, vert_indices: Tuple[int, int, int]) -> None:
-        # the low 6 bit are the node flags, the rest are triangle-specificä
-        self.flags = flags
-        self.vert_indices = vert_indices
+    # the low 6 bit are the node flags, the rest are triangle-specificä
+    flags: int
+    vert_indices: Tuple[int, int, int]
+
+def test_bitmask(nodes: List[Node]) -> None:
+    """
+    The assumption is that the bitmask is inherited upwards:
+    a node knows whether a certain type of triangle is inside.
+    This check tests that assumption.
+    """
+    def check_tree_bitmasks(root_index: int, expected: int) -> None:
+        root = nodes[root_index]
+        assert root.bitmask & expected == root.bitmask, f"node {root_index} bitmask {root.bitmask:b} does not fit expected pattern {expected:b}"
+        if root.is_leaf:
+            return
+        check_tree_bitmasks(root.children[0], root.bitmask)
+        check_tree_bitmasks(root.children[1], root.bitmask)
+    check_tree_bitmasks(0, (1<<32)-1)
+
+def verify_reachability(nodes: List[Node]) -> None:
+    """
+    Verifies the assumption that the AABB tree data contains no orphans,
+    i.e. that by traversing from the root, every node is visited.
+    Raises an AssertionError if the assumption is wrong.
+    """
+    reachable = [False] * len(nodes)
+    def check_reachability(root_index: int) -> None:
+        reachable[root_index] = True
+        root = nodes[root_index]
+        if root.is_leaf:
+            return
+        check_reachability(root.children[0])
+        check_reachability(root.children[1])
+    check_reachability(0)
+    unreachable = [i for i, r in enumerate(reachable) if not r]
+    assert len(unreachable) == 0, 'found {len(unreachable)} orphan node(s), first ten: {unreachable[:10]}'
+
+def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[Node], header: Header) -> None:
+    """
+    Visualises the AABB collision tree using a hierarchy of mesh objects.
+    As a side-effect, Node.debug_parent may be set on the incoming nodes.
+
+    FIXME: the result is wrong somehow. The AABBs don't _quite_ match the tris within.
+    """
+    def depth(node: Node) -> int:
+        if node.is_leaf:
+            return 0
+        c1, c2 = node.children
+        return 1 + max(depth(nodes[c1]), depth(nodes[c2]))
+    max_depth = depth(nodes[0])
+
+    def generate_debug_visualization(bounds: AABB, node_index: int, depth: int, parent: Optional[bpy.types.Object]) -> None:
+        if node_index < 0 or node_index >= len(nodes):
+            print(f"unexpected {node_index=}")
+            return
+
+        node = nodes[node_index]
+        node.debug_parent = parent
+        if node.is_leaf:
+            # We could visualise the final bounds here,
+            # but it would be redundant?
+            # Better to show the children, once available.
+            return
+        axis = node.axis
+        inside_bounds = bounds.copy()
+        inside_bounds.min[axis] = node.min
+        inside_bounds.max[axis] = node.max
+        axis2 = (axis+1) % 3
+        axis3 = (axis2+1) % 3
+        mins = [
+            inside_bounds.min[axis],
+            inside_bounds.min[axis2],
+            inside_bounds.min[axis3],
+        ]
+        maxs = [
+            inside_bounds.max[axis],
+            inside_bounds.max[axis2],
+            inside_bounds.max[axis3],
+        ]
+        verts = [
+            [mins[0], mins[1], mins[2]],
+            [mins[0], maxs[1], mins[2]],
+            [mins[0], maxs[1], maxs[2]],
+            [mins[0], mins[1], maxs[2]],
+
+            [maxs[0], mins[1], mins[2]],
+            [maxs[0], maxs[1], mins[2]],
+            [maxs[0], maxs[1], maxs[2]],
+            [maxs[0], mins[1], maxs[2]],
+        ]
+        # rotate vertices to correct axis
+        verts = map(lambda vert: vert[-axis:] + vert[:-axis], verts)
+        # apply scale & adjust axis
+        verts = [
+            y_up_to_z_up(scale_to_blender(v, header.axis_multipliers))
+            for v in verts
+        ]
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+        ] if ONLY_EDGES else []
+        faces = [] if ONLY_EDGES else [
+            (0, 1, 2, 3),
+            (4, 5, 6, 7),
+        ]
+        color = color_lerp(depth/max_depth, COLOR_SHALLOW, COLOR_DEEP)
+
+        inside_child, outside_child = node.children
+
+        mesh_inside: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}_inside")
+        mesh_inside.from_pydata(verts, edges, faces)
+        mesh_inside.update()
+        obj_inside: bpy.types.Object = bpy.data.objects.new(f"node{node_index}_inside", mesh_inside)
+        obj_inside.display_type = "WIRE"
+        obj_inside.color = color[:]+(1.0,)
+        collection.objects.link(obj_inside)
+
+        obj_outside: bpy.types.Object = bpy.data.objects.new(f"node{node_index}_outside", None)
+        obj_outside.display_type = "WIRE"
+        obj_outside.color = color[:]+(1.0,)
+        collection.objects.link(obj_outside)
+
+        if parent is not None:
+            obj_inside.parent = parent
+            obj_outside.parent = parent
+        # print(f"generated {node_index=}")
+        generate_debug_visualization(
+            bounds=inside_bounds,
+            node_index=inside_child,
+            depth=depth+1,
+            parent=obj_inside,
+        )
+        generate_debug_visualization(
+            bounds=bounds,
+            node_index=outside_child,
+            depth=depth+1,
+            parent=obj_outside,
+        )
+
+    generate_debug_visualization(
+        bounds=AABB(mathutils.Vector(header.mins), mathutils.Vector(header.maxs)),
+        node_index=0,
+        depth=0,
+        parent=None,
+    )
 
 def import_file(filename: str, enable_debug_visualization: bool = False):
     file_stats = os.stat(filename)
     file_size = file_stats.st_size
     with open(filename, "rb") as f:
         # Header
-        file_id: bytes
-        version: int
-        file_id, version = struct.unpack("<4si", f.read(2*4))
-        if file_id != FILE_ID:
-            raise ValueError(f'bad magic header, want {FILE_ID}, got {file_id}')
-        if version != VERSION:
-            # note that I'm not 100% certain this is a version number,
-            # but it's always 0 in my experience.
-            raise ValueError(f'bad file version, want {VERSION}, got {version}')
-        # scaled level AABB
-        mins = struct.unpack("<3i", f.read(3*4))
-        maxs = struct.unpack("<3i", f.read(3*4))
-        # conversion from the scaled short-coordinates used in the aabb-tree
-        # to the float game coordinates matching the visuals
-        # this appears to be the inverse (1/x) of the multipliers below
-        axis_multipliers = struct.unpack("<3f", f.read(3*4))
-        # incoming game coordinates get multiplied by this,
-        # it's the inverse of the axis_multipliers above.
-        # These values are chosen such that the result is in [-32767, 32767]
-        # (the range of a signed short*, which is what the checks in the tree use)
-        # * technically, signed short also includes -32768,
-        #   but canal1/a still only goes down to -32767.
-        #   I appreciate the symmetry.
-        #   Simplifies the calculation, if only slightly.
-        #   Though I suspect the game would be able to handle -32768, too.
-        #   But let's not generate anything the original tracks don't use,
-        #   nobody ever tested that.
-        inverse_axis_multipliers = struct.unpack("<3f", f.read(3*4))
-        ofs_tree = HEADER_SIZE
-        ofs_triangles: int
-        ofs_vertices: int
-        ofs_triangles, ofs_vertices = struct.unpack("<2I", f.read(2*4))
-        print(f"{ofs_vertices=} {file_size=}")
-        # offsets are relative to end of the header
-        ofs_triangles += HEADER_SIZE
-        ofs_vertices += HEADER_SIZE
 
-        len_tree = ofs_triangles - ofs_tree
-        len_triangles = ofs_vertices - ofs_triangles
-        len_vertices = file_size - ofs_vertices
-        assert(f.tell() == ofs_tree)
+        header = Header.from_reader(f, file_size)
 
         # Tree
+
         nodes: List[Node] = []
-        seen_flags: int = 0
+        # Since the bitmask appears to vary in length between leafs and non-leafs,
+        # this variable keeps track of what bits actually get used in practice.
+        # So far (in canal1/a) it looks like only the 4 low bits get used.
+        seen_bitmask: int = 0
+        # Count how often each kind of leaf encoding is used.
+        # This was primarily used to decide which one to implement first.
         kind_counts: Dict[int, int] = {}
-        while f.tell() + NODE_SIZE <= ofs_triangles:
-            node = Node(f.read(NODE_SIZE))
+        while f.tell() + NODE_SIZE <= header.ofs_triangles:
+            node = Node(f.read(NODE_SIZE), len(nodes), header)
+            # collect some debugging stats
             if node.is_leaf:
                 kind_counts[node.leaf_kind] = kind_counts.get(node.leaf_kind, 0) + 1
-            else:
-                assert (node.children[0] + 1) * NODE_SIZE <= len_tree, f"leaf {len(nodes)} first child {node.children[0]} out of range {len_tree//NODE_SIZE}"
-                assert (node.children[1] + 1) * NODE_SIZE <= len_tree, f"leaf {len(nodes)} second child {node.children[1]} out of range {len_tree//NODE_SIZE}"
+            seen_bitmask |= node.bitmask
             nodes.append(node)
-            seen_flags |= node.bitmask
 
         if TEST_BITMASK:
-            # the assumption is that this bitmask is inherited upwards:
-            # a node knows whether a certain type of triangle is inside.
-            # this check tests that assumption.
-            def check_tree_bitmasks(root_index: int, expected: int) -> None:
-                root = nodes[root_index]
-                assert root.bitmask & expected == root.bitmask, f"node {root_index} bitmask {root.bitmask:b} does not fit expected pattern {expected:b}"
-                if root.is_leaf:
-                    return
-                check_tree_bitmasks(root.children[0], root.bitmask)
-                check_tree_bitmasks(root.children[1], root.bitmask)
-            check_tree_bitmasks(0, (1<<32)-1)
+            test_bitmask(nodes)
 
         if VERIFY_REACHABILITY:
-            # the tree should not contain any orphan nodes, presumably
-            reachable = [False] * len(nodes)
-            def check_reachability(root_index: int) -> None:
-                reachable[root_index] = True
-                root = nodes[root_index]
-                if root.is_leaf:
-                    return
-                check_reachability(root.children[0])
-                check_reachability(root.children[1])
-            check_reachability(0)
-            unreachable = [i for i, r in enumerate(reachable) if not r]
-            assert len(unreachable) == 0, 'found {len(unreachable)} orphan node(s), first ten: {unreachable[:10]}'
+            verify_reachability(nodes)
 
         collision_collection = bpy.data.collections.new('collision')
         bpy.context.scene.collection.children.link(collision_collection)
         if enable_debug_visualization:
-
-            def depth(node: Node) -> int:
-                if node.is_leaf:
-                    return 0
-                c1, c2 = node.children
-                return 1 + max(depth(nodes[c1]), depth(nodes[c2]))
-            max_depth = depth(nodes[0])
-
-            def generate_debug_visualization(bounds: AABB, node_index: int, depth: int, parent: Optional[bpy.types.Object]) -> None:
-                if node_index < 0 or node_index >= len(nodes):
-                    print(f"unexpected {node_index=}")
-                    return
-
-                node = nodes[node_index]
-                node.debug_parent = parent
-                if node.is_leaf:
-                    # We could visualise the final bounds here,
-                    # but it would be redundant?
-                    # Better to show the children, once available.
-                    return
-                axis = node.axis
-                inside_bounds = bounds.copy()
-                inside_bounds.min[axis] = node.min
-                inside_bounds.max[axis] = node.max
-                axis2 = (axis+1) % 3
-                axis3 = (axis2+1) % 3
-                mins = [
-                    inside_bounds.min[axis],
-                    inside_bounds.min[axis2],
-                    inside_bounds.min[axis3],
-                ]
-                maxs = [
-                    inside_bounds.max[axis],
-                    inside_bounds.max[axis2],
-                    inside_bounds.max[axis3],
-                ]
-                verts = [
-                    [mins[0], mins[1], mins[2]],
-                    [mins[0], maxs[1], mins[2]],
-                    [mins[0], maxs[1], maxs[2]],
-                    [mins[0], mins[1], maxs[2]],
-                    
-                    [maxs[0], mins[1], mins[2]],
-                    [maxs[0], maxs[1], mins[2]],
-                    [maxs[0], maxs[1], maxs[2]],
-                    [maxs[0], mins[1], maxs[2]],
-                ]
-                # rotate vertices to correct axis
-                verts = map(lambda vert: vert[-axis:] + vert[:-axis], verts)
-                # apply scale & adjust axis
-                verts = [
-                    y_up_to_z_up(scale_to_blender(v, axis_multipliers))
-                    for v in verts
-                ]
-                edges = [
-                    (0, 1), (1, 2), (2, 3), (3, 0),
-                    (4, 5), (5, 6), (6, 7), (7, 4),
-                ] if ONLY_EDGES else []
-                faces = [] if ONLY_EDGES else [
-                    (0, 1, 2, 3),
-                    (4, 5, 6, 7),
-                ]
-                color = color_lerp(depth/max_depth, COLOR_SHALLOW, COLOR_DEEP)
-
-                inside_child, outside_child = node.children
-
-                mesh_inside: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}_inside")
-                mesh_inside.from_pydata(verts, edges, faces)
-                mesh_inside.update()
-                obj_inside: bpy.types.Object = bpy.data.objects.new(f"node{node_index}_inside", mesh_inside)
-                obj_inside.display_type = "WIRE"
-                obj_inside.color = color[:]+(1.0,)
-                collision_collection.objects.link(obj_inside)
-
-                obj_outside: bpy.types.Object = bpy.data.objects.new(f"node{node_index}_outside", None)
-                obj_outside.display_type = "WIRE"
-                obj_outside.color = color[:]+(1.0,)
-                collision_collection.objects.link(obj_outside)
-
-                if parent is not None:
-                    obj_inside.parent = parent
-                    obj_outside.parent = parent
-                # print(f"generated {node_index=}")
-                generate_debug_visualization(
-                    bounds=inside_bounds,
-                    node_index=inside_child,
-                    depth=depth+1,
-                    parent=obj_inside,
-                )
-                generate_debug_visualization(
-                    bounds=bounds,
-                    node_index=outside_child,
-                    depth=depth+1,
-                    parent=obj_outside,
-                )
-
-            generate_debug_visualization(
-                bounds=AABB(mathutils.Vector(mins), mathutils.Vector(maxs)),
-                node_index=0,
-                depth=0,
-                parent=None,
+            generate_debug_visualisation(
+                collection=collision_collection,
+                nodes=nodes,
+                header=header,
             )
 
         # Triangles
+
         # This chunk of data contains per-triangle flags
         # and the indices of the relevant vertices
         # packed into individual bits in various ways
-        assert f.tell() == ofs_triangles
-        triangle_data = f.read(len_triangles)
+        assert f.tell() == header.ofs_triangles
+        triangle_data = f.read(header.len_triangles)
 
         # Vertex coordinates
-        assert f.tell() == ofs_vertices
+
+        assert f.tell() == header.ofs_vertices
         if False:
             vertex_coords = [
                 y_up_to_z_up(
@@ -388,8 +476,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                 collision_collection.objects.link(verts_obj)
         else:
             vertex_coords = [
-                struct.unpack("h", f.read(2))[0]
-                for i in range(0, len_vertices, 2)
+                struct.unpack("<h", f.read(2))[0]
+                for i in range(0, header.len_vertices, 2)
             ]
             # if coordinates are not triplets, there's no way to dump them here
 
@@ -412,7 +500,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         triangles: List[Triangle] = []
         vert_offset = node.vert_offset
         iter = node.triangle_offset
-        
+
         if node.leaf_kind == 2:
             for i in range(node.num_triangles):
                 tri = Triangle(
@@ -434,7 +522,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             def map_index(idx: int) -> int:
                 if idx in index_mapping:
                     return index_mapping[idx]
-                assert idx < len(vertex_coords), f"vertex index {idx} out of range, there are {len(vertex_coords)} vertices totalling {len_vertices} bytes"
+                assert idx < len(vertex_coords), f"vertex index {idx} out of range, there are {len(vertex_coords)} vertices totalling {header.len_vertices} bytes"
                 mapping = len(mapped_verts)
                 # TODO simplify the vertex handling
                 # it's confusing that we treat vertices as individual scalars up to here
@@ -446,7 +534,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                                 vertex_coords[idx+1],
                                 vertex_coords[idx+2],
                             ),
-                            axis_multipliers,
+                            header.axis_multipliers,
                         ),
                     ),
                 )
@@ -469,20 +557,11 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             if node.debug_parent is not None:
                 obj.parent = node.debug_parent
 
+    # debug print for me, the developer :)
     print(f"""file info:
-{mins=}
-{maxs=}
-{inverse_axis_multipliers=}
-{axis_multipliers=}
-{ofs_tree=}
-{len_tree=}
-{ofs_triangles=}
-{len_triangles=}
-{ofs_vertices=}
-{len_vertices=}
-{file_size=}
+{header=}
 {len(nodes)=}
-seen_flags={seen_flags:b}
+seen_bitmask={seen_bitmask:b}
 {kind_counts=}
 
 {enable_debug_visualization=}
