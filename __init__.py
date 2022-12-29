@@ -530,7 +530,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         # then we want one object per node.
         vertex_mapping = VertexMapping(header=header, vertex_coords=vertex_coords)
         all_mapped_tris: List[List[int]] = []
-        all_flags: Set[int] = set()
+    all_flags: Set[int] = set()
     for (node_index, node) in enumerate(nodes):
         if not node.is_leaf:
             continue
