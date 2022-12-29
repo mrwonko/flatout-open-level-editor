@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import mathutils
 import os
 import struct
-from typing import Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Dict, List, Optional, Set, Tuple, TypeVar, Union
 
 bl_info = {
     "name": "track_cdb2 format",
@@ -19,7 +19,6 @@ HEADER_SIZE = 64
 NODE_SIZE = 8
 ONLY_EDGES = False
 TEST_BITMASK = True
-DUMP_VERTICES = True
 VERIFY_REACHABILITY = True
 CHECK_BOUNDS = True
 COLOR_SHALLOW = mathutils.Color((0xD0/0xFF, 0x00/0xFF, 0x70/0xFF))
@@ -187,6 +186,7 @@ class Node:
             self._flags = hi & ones(FLAGS_BITS)
             hi >>= FLAGS_BITS
             self._vert_offset = hi
+            self.triangles: Optional[List[Triangle]] = None
         else:
             # 24b child offset, 6b mask, 2b axis
             MASK_BITS = 6
@@ -260,7 +260,7 @@ class Node:
 
 @dataclass
 class Triangle:
-    # the low 6 bit are the node flags, the rest are triangle-specificä
+    # the low 6 bit are the node flags, the rest are triangle-specific
     flags: int
     vert_indices: Tuple[int, int, int]
 
@@ -296,6 +296,20 @@ def verify_reachability(nodes: List[Node]) -> None:
     check_reachability(0)
     unreachable = [i for i, r in enumerate(reachable) if not r]
     assert len(unreachable) == 0, 'found {len(unreachable)} orphan node(s), first ten: {unreachable[:10]}'
+
+def check_bounds(nodes: List[Node], len_triangle_data: int, len_vertex_coords: int):
+    """
+    Verifies that all the indices/offsets referenced in the aabb tree are within bounds.
+    Only checks the start of the referenced range.
+    Without these optional checks, we might get slightly less helpful errors later on.
+    """
+    for node_index, node in enumerate(nodes):
+        if node.is_leaf:
+            assert node.triangle_offset < len_triangle_data, f"node {node_index} triangle_offset {node.triangle_offset} is out of range [0, {len_triangle_data}]"
+            assert node.vert_offset < len_vertex_coords, f"node {node_index} vert_offset {node.vert_offset} is out of range [0, {len_vertex_coords}]"
+        else:
+            assert node.children[0] >= 0, f"node {node_index} inner child index {node.children[0]} is negative"
+            assert node.children[1] < len(nodes), f"node {node_index} outer child index {node.children[1]} is above {len(nodes)}"
 
 def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[Node], header: Header) -> None:
     """
@@ -406,6 +420,35 @@ def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[N
         parent=None,
     )
 
+class VertexMapping:
+    def __init__(self, header: Header, vertex_coords: List[int]) -> None:
+        self.header = header
+        self.vertex_coords = vertex_coords
+        self.mapped_verts: List[List[float]] = []
+        self.index_mapping: Dict[int, int] = {}
+
+    def lookup(self, idx: int) -> int:
+        if idx in self.index_mapping:
+            return self.index_mapping[idx]
+        assert idx < len(self.vertex_coords), f"vertex index {idx} out of range, there are {len(self.vertex_coords)} vertices totalling {self.header.len_vertices} bytes"
+        mapping = len(self.mapped_verts)
+        # TODO simplify the vertex handling
+        # it's confusing that we treat vertices as individual scalars up to here
+        self.mapped_verts.append(
+            y_up_to_z_up(
+                scale_to_blender(
+                    (
+                        self.vertex_coords[idx],
+                        self.vertex_coords[idx+1],
+                        self.vertex_coords[idx+2],
+                    ),
+                    self.header.axis_multipliers,
+                ),
+            ),
+        )
+        self.index_mapping[idx] = mapping
+        return mapping
+
 def import_file(filename: str, enable_debug_visualization: bool = False):
     file_stats = os.stat(filename)
     file_size = file_stats.st_size
@@ -458,42 +501,36 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         # Vertex coordinates
 
         assert f.tell() == header.ofs_vertices
-        if False:
-            vertex_coords = [
-                y_up_to_z_up(
-                    scale_to_blender(
-                        struct.unpack("3h", f.read(3*2)),
-                        axis_multipliers,
-                    ),
-                )
-                for i in range(0, len_vertices, 3*2)
-            ]
-            if DUMP_VERTICES:
-                verts_mesh: bpy.types.Mesh = bpy.data.meshes.new(f"onlyverts")
-                verts_mesh.from_pydata(vertex_coords, (), ())
-                verts_mesh.update()
-                verts_obj: bpy.types.Object = bpy.data.objects.new(f"onlyverts", verts_mesh)
-                collision_collection.objects.link(verts_obj)
-        else:
-            vertex_coords = [
-                struct.unpack("<h", f.read(2))[0]
-                for i in range(0, header.len_vertices, 2)
-            ]
-            # if coordinates are not triplets, there's no way to dump them here
+        # The vertex data consists of 16 bit integers,
+        # scaled using the axis_multipliers like the tree nodes.
+        # It should be read in 3-tuples for x, y and z,
+        # but apparently there can be gaps between these tuples,
+        # so we can't read triplets here yet.
+        vertex_coords = [
+            struct.unpack("<h", f.read(2))[0]
+            for i in range(0, header.len_vertices, 2)
+        ]
 
 
         if CHECK_BOUNDS:
-            for node_index, node in enumerate(nodes):
-                if node.is_leaf:
-                    assert node.triangle_offset < len(triangle_data), f"node {node_index} triangle_offset {node.triangle_offset} is out of range [0, {len(triangle_data)}]"
-                    assert node.vert_offset < len(vertex_coords), f"node {node_index} vert_offset {node.vert_offset} is out of range [0, {len(vertex_coords)}]"
-                else:
-                    assert node.children[0] >= 0, f"node {node_index} inner child index {node.children[0]} is negative"
-                    assert node.children[1] < len(nodes), f"node {node_index} outer child index {node.children[1]} is above {len(nodes)}"
+            check_bounds(
+                nodes=nodes,
+                len_triangle_data=len(triangle_data),
+                len_vertex_coords=len(vertex_coords),
+            )
 
         # at this point, we're done reading from the file
 
     # now that we have all necessary data in memory, we can build the geometry
+    if not enable_debug_visualization:
+        # usually, we combine everything into a single mesh,
+        # because Blender doesn't like having lots of objects,
+        # and because there is no useful meaning in those objects anyway
+        # - except when we want to visualise the AABB tree,
+        # then we want one object per node.
+        vertex_mapping = VertexMapping(header=header, vertex_coords=vertex_coords)
+        all_mapped_tris: List[List[int]] = []
+        all_flags: Set[int] = set()
     for (node_index, node) in enumerate(nodes):
         if not node.is_leaf:
             continue
@@ -517,45 +554,40 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         if len(triangles) > 0:
             # Blender uses per-object vertex buffers,
             # so we copy the relevant vertices to our own buffer
-            mapped_verts: List[List[float]] = []
-            index_mapping: Dict[int, int] = {}
-            def map_index(idx: int) -> int:
-                if idx in index_mapping:
-                    return index_mapping[idx]
-                assert idx < len(vertex_coords), f"vertex index {idx} out of range, there are {len(vertex_coords)} vertices totalling {header.len_vertices} bytes"
-                mapping = len(mapped_verts)
-                # TODO simplify the vertex handling
-                # it's confusing that we treat vertices as individual scalars up to here
-                mapped_verts.append(
-                    y_up_to_z_up(
-                        scale_to_blender(
-                            (
-                                vertex_coords[idx],
-                                vertex_coords[idx+1],
-                                vertex_coords[idx+2],
-                            ),
-                            header.axis_multipliers,
-                        ),
-                    ),
-                )
-                index_mapping[idx] = mapping
-                return mapping
+            if enable_debug_visualization:
+                # to visualise the tree, use a separate object attached
+                vertex_mapping = VertexMapping(header=header, vertex_coords=vertex_coords)
+
             mapped_tris = [
-                [map_index(idx) for idx in tri.vert_indices]
+                [vertex_mapping.lookup(idx) for idx in tri.vert_indices]
                 for tri in triangles
             ]
+            all_flags.update(map(lambda t: t.flags, triangles))
 
-            mesh: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}")
-            mesh.from_pydata(
-                mapped_verts,
-                (),
-                mapped_tris,
-            )
-            mesh.update()
-            obj: bpy.types.Object = bpy.data.objects.new(f"node{node_index}", mesh)
-            collision_collection.objects.link(obj)
-            if node.debug_parent is not None:
-                obj.parent = node.debug_parent
+            if enable_debug_visualization:
+                mesh: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}")
+                mesh.from_pydata(
+                    vertex_mapping.mapped_verts,
+                    (),
+                    mapped_tris,
+                )
+                mesh.update()
+                obj: bpy.types.Object = bpy.data.objects.new(f"node{node_index}", mesh)
+                collision_collection.objects.link(obj)
+                if node.debug_parent is not None:
+                    obj.parent = node.debug_parent
+            else:
+                all_mapped_tris.extend(mapped_tris)
+    if not enable_debug_visualization:
+        mesh: bpy.types.Mesh = bpy.data.meshes.new(f"collision")
+        mesh.from_pydata(
+            vertex_mapping.mapped_verts,
+            (),
+            all_mapped_tris,
+        )
+        mesh.update()
+        obj: bpy.types.Object = bpy.data.objects.new(f"collision", mesh)
+        collision_collection.objects.link(obj)
 
     # debug print for me, the developer :)
     print(f"""file info:
@@ -563,6 +595,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
 {len(nodes)=}
 seen_bitmask={seen_bitmask:b}
 {kind_counts=}
+{all_flags=} ({len(all_flags)} total)
 
 {enable_debug_visualization=}
 """)
