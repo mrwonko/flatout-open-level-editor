@@ -50,9 +50,13 @@ class Header:
     inverse_axis_multipliers: Tuple[float, float, float]
     # offset in bytes after the end of the header to the packed triangle buffer.
     # see ofs_triangles for absolute offset.
+    # References into this data use 23 bit offsets,
+    # implicitly limiting the number of triangles to 8388608/3 = 2796202.
     relative_ofs_triangles: int
     # offset in bytes after the end of the header to the vertex coordinates.
     # see ofs_vertices for absolute offset.
+    # References to the 3-tuples of 2-byte-elements herein use 19 bit indices,
+    # implicitly limiting the number of vertices to 524288/3 = 174762.
     relative_ofs_vertices: int
     # not part of the header itself, but related to the offsets above,
     # so they're stored together.
@@ -178,14 +182,14 @@ class Node:
             lo >>= MASK_BITS
             self._kind = lo & ones(KIND_BITS)
             lo >>= KIND_BITS
-            self._triangle_offset = lo
+            self._triangle_offset = lo # 32-2-4-3 = 23 bit
             hi: int
             hi, = struct.unpack("<I", data[4:])
             self._num_triangles = hi & ones(COUNT_BITS)
             hi >>= COUNT_BITS
             self._flags = hi & ones(FLAGS_BITS)
             hi >>= FLAGS_BITS
-            self._vert_offset = hi
+            self._vert_offset = hi # 19 bit
             self.triangles: Optional[List[Triangle]] = None
         else:
             # 24b child offset, 6b mask, 2b axis
@@ -221,6 +225,9 @@ class Node:
         return self._num_triangles
     @property
     def triangle_offset(self) -> int:
+        """
+        Only for leafs: 23-bit offset into the packed triangle buffer.
+        """
         assert self.is_leaf, 'only leafs have triangles'
         return self._triangle_offset
     @property
@@ -235,7 +242,7 @@ class Node:
     @property
     def vert_offset(self) -> int:
         '''
-        Only for leafs: fixed offset into the vertex buffer.
+        Only for leafs: 19-bit index into the vertex buffer.
         Depending on the leaf_kind, this is only applied to some vertices.
         '''
         assert self.is_leaf, 'only leafs have vertex offset'
@@ -265,9 +272,9 @@ class Triangle:
     flags: int
     vert_indices: Tuple[int, int, int]
 
-    def check_bounds(self, node_index: int, len_vert_coords: int) -> None:
+    def check_bounds(self, node: Node, node_index: int, len_vert_coords: int) -> None:
         for axis, idx in enumerate(self.vert_indices):
-            assert idx+2 < len_vert_coords, f"node {node_index} axis {axis} vertex index {idx} out of range (max {len_vert_coords-2})"
+            assert idx+2 < len_vert_coords, f"node {node_index} (kind {node.leaf_kind}) axis {axis} vertex index {idx} out of range (max {len_vert_coords-2})"
 
 def test_bitmask(nodes: List[Node]) -> None:
     """
@@ -540,6 +547,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         if not node.is_leaf or node.num_triangles == 0:
             continue
         triangles: List[Triangle] = []
+        # 19 bit
         vert_offset = node.vert_offset
         iter = node.triangle_offset
         def get(i: int = 0) -> int:
@@ -551,30 +559,66 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             return triangle_data[iter+i]
 
         if node.leaf_kind == 0:
-            # until I can figure out why I get out-of-bounds vertex indices here, I'm skipping the first triangle
             triangles.append(Triangle(
+                # 6 + 6 + 2 bit
                 flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
                 vert_indices=(
+                    # 19 bit
                     vert_offset,
-                    # FIXME this is out of bounds?!
+                    # 19 bit
                     get(1) | get(2) << 8 | (get(3) & ones(3)) << 8+8,
+                    # 21 bit (!?)
                     get(3) >> 3 | get(4) << 5 | get(5) << 5+8
                 ),
             ))
-            triangles[-1].check_bounds(node_index, len(vertex_coords))
+            triangles[-1].check_bounds(node, node_index, len(vertex_coords))
             iter += 6
             # 0th triangle (above) is unconditional, start loop at 1st
             for i in range(1, node.num_triangles):
                 triangles.append(Triangle(
+                    # 6 + 6 + 2 bit
                     flags=(get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
                     vert_indices=(
+                        # 19 bit
                         get(1) >> 7 | get(2) << 1 | get(3) << 1+8 | (get(4) & ones(2)) << 1+8+8,
+                        # 19 bit
                         get(4) >> 2 | get(5) << 6 | (get(6) & ones(5)) << 6+8,
+                        # 19 bit
                         get(6) >> 5 | get(7) << 3 | get(8) << 3+8,
                     ),
                 ))
-                triangles[-1].check_bounds(node_index, len(vertex_coords))
+                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
                 iter += 9
+        elif node.leaf_kind == 1:
+            triangles.append(Triangle(
+                # 6 + 6 + 2 bit
+                flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                vert_indices=(
+                    # 19 bit
+                    vert_offset,
+                    # 19 bit
+                    get(1) | get(2) << 8 | (get(3) & ones(3)) << 8+8,
+                    # 21 bit (!?)
+                    get(3) >> 3 | get(4) << 5 | get(5) << 5+8
+                ),
+            ))
+            triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+            iter += 6
+            for i in range(1, node.num_triangles):
+                triangles.append(Triangle(
+                    # 6 + 6 + 1 bit
+                    flags=node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) >> 6) & ones(1)) << 8+8,
+                    vert_indices=(
+                        # 19 bit
+                        get(0) >> 7 | get(1) << 1 | get(2) << 1+8 | (get(3) & ones(2)) << 1+8+8,
+                        # 19 bit
+                        get(3) >> 2 | get(4) << 6 | (get(5) & ones(5)) << 6+8,
+                        # 19 bit
+                        get(5) >> 5 | get(6) << 3 | get(7) << 3+8,
+                    ),
+                ))
+                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                iter += 8
         elif node.leaf_kind == 2:
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
@@ -582,12 +626,15 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                     vert_indices=(
                         # because we only use a single byte of triangle data,
                         # we can only reference a range of 256 consecutive vertices
+                        # 8 bit
                         vert_offset + get(2),
+                        # 8 bit
                         vert_offset + get(3),
+                        # 8 bit
                         vert_offset + get(4),
                     ),
                 ))
-                triangles[-1].check_bounds(node_index, len(vertex_coords))
+                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
                 iter += 5
         # TODO: other kinds
         if len(triangles) > 0:
