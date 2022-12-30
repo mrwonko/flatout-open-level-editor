@@ -9,7 +9,7 @@ seq:
   size: 64
 - id: nodes
   type: nodes
-  size: header.ofs_indices - 64
+  size: header.ofs_indices
 - id: indices
   type: indices
   size: header.ofs_primitives - header.ofs_indices
@@ -40,19 +40,48 @@ types:
       repeat: eos
   node:
     seq:
-    - id: child
-      type: b24
-    - id: flags
-      type: b6
-    - id: axis
-      type: b2
-      doc: Values 0-2 describe the axis to check against, value 3 marks a leaf
+    - id: first_dword
+      type: u4
     - id: max # presumably?
       type: s2
+      if: first_dword & 3 != 3
     - id: min # presumably?
       type: s2
+      if: first_dword & 3 != 3
       # valid:
       #   expr: _ <= max # apparently does not always hold true
+    - id: vertex_offset
+      type: b19
+      if: first_dword & 3 == 3
+    - id: leaf_flags
+      type: b6
+      if: first_dword & 3 == 3
+    - id: num_triangles
+      type: b7
+      if: first_dword & 3 == 3
+    instances:
+      child0_index:
+        # this is actually the offset divided by 8
+        value: first_dword >> 11
+        if: first_dword & 3 != 3
+      child1_index:
+        value: (first_dword >> 11)+1
+        if: first_dword & 3 != 3
+      node_mask:
+        value: (first_dword >> 2) & 63
+        if: first_dword & 3 != 3
+      axis:
+        value: first_dword & 3
+        if: first_dword & 3 != 3
+      triangle_begin:
+        value: first_dword >> 9
+        if: first_dword & 3 == 3
+      leaf_kind:
+        value: (first_dword >> 6) & 7
+        if: first_dword & 3 == 3
+      leaf_mask:
+        value: (first_dword >> 2) & 15
+        if: first_dword & 3 == 3
   indices:
     seq:
     - id: entries
