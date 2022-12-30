@@ -537,34 +537,40 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         all_mapped_tris: List[List[int]] = []
     all_flags: Set[int] = set()
     for (node_index, node) in enumerate(nodes):
-        if not node.is_leaf:
+        if not node.is_leaf or node.num_triangles == 0:
             continue
         triangles: List[Triangle] = []
         vert_offset = node.vert_offset
         iter = node.triangle_offset
+        def get(i: int = 0) -> int:
+            """
+            Iterator lookup with offset.
+            This function name is admittedly overly generic,
+            but the main concern here is brevity and simplicity.
+            """
+            return triangle_data[iter+i]
 
         if node.leaf_kind == 0:
             # until I can figure out why I get out-of-bounds vertex indices here, I'm skipping the first triangle
-            if False:
-                triangles.append(Triangle(
-                    flags=node.leaf_flags | (triangle_data[iter] & ones(6)) << 8 | (triangle_data[iter] >> 6) << 8+8,
-                    vert_indices=(
-                        vert_offset,
-                        # FIXME this is out of bounds?!
-                        triangle_data[iter+1] | triangle_data[iter+2] << 8 | (triangle_data[iter+3] & ones(3)) << 8+8,
-                        triangle_data[iter+3] >> 3 | triangle_data[iter+4] << 5 | triangle_data[iter+5] << 5+8,
-                    ),
-                ))
-                triangles[-1].check_bounds(node_index, len(vertex_coords))
+            triangles.append(Triangle(
+                flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                vert_indices=(
+                    vert_offset,
+                    # FIXME this is out of bounds?!
+                    get(1) | get(2) << 8 | (get(3) & ones(3)) << 8+8,
+                    get(3) >> 3 | get(4) << 5 | get(5) << 5+8
+                ),
+            ))
+            triangles[-1].check_bounds(node_index, len(vertex_coords))
             iter += 6
             # 0th triangle (above) is unconditional, start loop at 1st
             for i in range(1, node.num_triangles):
                 triangles.append(Triangle(
-                    flags=(triangle_data[iter+1] & ones(6)) | (triangle_data[iter] & ones(6)) << 8 | (triangle_data[iter] >> 6) << 8+8,
+                    flags=(get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
                     vert_indices=(
-                        triangle_data[iter+1] >> 7 | triangle_data[iter+2] << 1 | triangle_data[iter+3] << 1+8 | (triangle_data[iter+4] & ones(2)) << 1+8+8,
-                        triangle_data[iter+4] >> 2 | triangle_data[iter+5] << 6 | (triangle_data[iter+6] & ones(5)) << 6+8,
-                        triangle_data[iter+6] >> 5 | triangle_data[iter+7] << 3 | triangle_data[iter+8] << 3+8,
+                        get(1) >> 7 | get(2) << 1 | get(3) << 1+8 | (get(4) & ones(2)) << 1+8+8,
+                        get(4) >> 2 | get(5) << 6 | (get(6) & ones(5)) << 6+8,
+                        get(6) >> 5 | get(7) << 3 | get(8) << 3+8,
                     ),
                 ))
                 triangles[-1].check_bounds(node_index, len(vertex_coords))
@@ -572,13 +578,13 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         elif node.leaf_kind == 2:
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
-                    flags=(triangle_data[iter+1] & ones(6)) | (triangle_data[iter] & ones(6)) << 8 | (triangle_data[iter] >> 6) << 8+8,
+                    flags=(get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
                     vert_indices=(
                         # because we only use a single byte of triangle data,
                         # we can only reference a range of 256 consecutive vertices
-                        vert_offset + triangle_data[iter+2],
-                        vert_offset + triangle_data[iter+3],
-                        vert_offset + triangle_data[iter+4],
+                        vert_offset + get(2),
+                        vert_offset + get(3),
+                        vert_offset + get(4),
                     ),
                 ))
                 triangles[-1].check_bounds(node_index, len(vertex_coords))
