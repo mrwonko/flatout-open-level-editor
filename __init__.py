@@ -135,8 +135,8 @@ def y_up_to_z_up(vert: List[T]) -> List[T]:
     """
     return [
         vert[0],
-        -vert[2],
-        -vert[1],
+        vert[2],
+        vert[1],
     ]
 
 def scale_to_blender(vert: Union[Tuple[int, int, int], List[int]], multipliers: List[float]) -> List[float]:
