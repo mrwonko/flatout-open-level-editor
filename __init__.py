@@ -135,7 +135,7 @@ def y_up_to_z_up(vert: List[T]) -> List[T]:
     """
     return [
         vert[0],
-        vert[2],
+        -vert[2],
         -vert[1],
     ]
 
@@ -698,6 +698,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                 [vertex_mapping.lookup(idx) for idx in tri.vert_indices]
                 for tri in triangles
             ]
+            # flip triangles
+            mapped_tris = [list(reversed(tri)) for tri in mapped_tris]
             all_flags.update(map(lambda t: t.flags, triangles))
 
             if enable_debug_visualization:
