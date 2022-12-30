@@ -622,6 +622,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         elif node.leaf_kind == 2:
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
+                    # 6 + 6 + 2 bit
                     flags=(get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
                     vert_indices=(
                         # because we only use a single byte of triangle data,
@@ -636,6 +637,22 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                 ))
                 triangles[-1].check_bounds(node, node_index, len(vertex_coords))
                 iter += 5
+        elif node.leaf_kind == 3:
+            for i in range(node.num_triangles):
+                triangles.append(Triangle(
+                    # 6 + 6 + 2 bit
+                    flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                    vert_indices=(
+                        # 8 bit
+                        vert_offset + get(1),
+                        # 8 bit
+                        vert_offset + get(2),
+                        # 8 bit
+                        vert_offset + get(3),
+                    ),
+                ))
+                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                iter += 4
         # TODO: other kinds
         if len(triangles) > 0:
             # Blender uses per-object vertex buffers,
