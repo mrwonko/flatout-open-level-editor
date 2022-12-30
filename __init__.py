@@ -653,7 +653,27 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                 ))
                 triangles[-1].check_bounds(node, node_index, len(vertex_coords))
                 iter += 4
-        # TODO: other kinds
+        elif node.leaf_kind == 4:
+            for i in range(node.num_triangles):
+                triangles.append(Triangle(
+                    # 6 + 6 + 1 bit
+                    flags=node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) & ones(1)) >> 6) << 8+8,
+                    vert_indices=(
+                        # 12 bit
+                        vert_offset + (get(0) >> 7 | get(1) << 1 | (get(2) & ones(2)) << 1+8),
+                        # 12 bit
+                        vert_offset + (get(2) >> 2 | (get(3) & ones(5)) << 6),
+                        # 11 bit
+                        vert_offset + (get(3) >> 5 | get(4) << 3),
+                    ),
+                ))
+                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                iter += 5
+        elif node.leaf_kind == 5:
+            # TODO: implement
+            pass
+        else:
+            raise ValueError(f"invalid kind {node.leaf_kind} on leaf {node_index}")
         if len(triangles) > 0:
             # Blender uses per-object vertex buffers,
             # so we copy the relevant vertices to our own buffer
