@@ -670,8 +670,21 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                 triangles[-1].check_bounds(node, node_index, len(vertex_coords))
                 iter += 5
         elif node.leaf_kind == 5:
-            # TODO: implement
-            pass
+            for i in range(node.num_triangles):
+                triangles.append(Triangle(
+                    # 6 + 6 + 2 bit
+                    flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                    vert_indices=(
+                        # 5 bit
+                        vert_offset + (get(1) & ones(5)),
+                        # 5 bit
+                        vert_offset + (get(1) >> 5 | (get(2) & ones(2)) << 3),
+                        # 6 bit
+                        vert_offset + (get(2) >> 2),
+                    ),
+                ))
+                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                iter += 3
         else:
             raise ValueError(f"invalid kind {node.leaf_kind} on leaf {node_index}")
         if len(triangles) > 0:
