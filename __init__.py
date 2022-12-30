@@ -17,7 +17,6 @@ FILE_ID = b'!vq\x98'
 VERSION = 0
 HEADER_SIZE = 64
 NODE_SIZE = 8
-ONLY_EDGES = False
 TEST_BITMASK = True
 VERIFY_REACHABILITY = True
 CHECK_BOUNDS = True
@@ -351,67 +350,63 @@ def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[N
             return
         axis = node.axis
         inside_bounds = bounds.copy()
-        inside_bounds.min[axis] = node.min
+        outside_bounds = bounds.copy()
+        outside_bounds.min[axis] = node.min
         inside_bounds.max[axis] = node.max
-        axis2 = (axis+1) % 3
-        axis3 = (axis2+1) % 3
-        mins = [
-            inside_bounds.min[axis],
-            inside_bounds.min[axis2],
-            inside_bounds.min[axis3],
-        ]
-        maxs = [
-            inside_bounds.max[axis],
-            inside_bounds.max[axis2],
-            inside_bounds.max[axis3],
-        ]
-        verts = [
-            [mins[0], mins[1], mins[2]],
-            [mins[0], maxs[1], mins[2]],
-            [mins[0], maxs[1], maxs[2]],
-            [mins[0], mins[1], maxs[2]],
+        def visualise_bounds(name: str, aabb: AABB, axis: int, color: mathutils.Color) -> bpy.types.Object:
+            mins = aabb.min
+            maxs = aabb.max
+            verts = [
+                [mins[0], mins[1], mins[2]],
+                [mins[0], maxs[1], mins[2]],
+                [mins[0], maxs[1], maxs[2]],
+                [mins[0], mins[1], maxs[2]],
 
-            [maxs[0], mins[1], mins[2]],
-            [maxs[0], maxs[1], mins[2]],
-            [maxs[0], maxs[1], maxs[2]],
-            [maxs[0], mins[1], maxs[2]],
-        ]
-        # rotate vertices to correct axis
-        verts = map(lambda vert: vert[-axis:] + vert[:-axis], verts)
-        # apply scale & adjust axis
-        verts = [
-            y_up_to_z_up(scale_to_blender(v, header.axis_multipliers))
-            for v in verts
-        ]
-        edges = [
-            (0, 1), (1, 2), (2, 3), (3, 0),
-            (4, 5), (5, 6), (6, 7), (7, 4),
-        ] if ONLY_EDGES else []
-        faces = [] if ONLY_EDGES else [
-            (0, 1, 2, 3),
-            (4, 5, 6, 7),
-        ]
+                [maxs[0], mins[1], mins[2]],
+                [maxs[0], maxs[1], mins[2]],
+                [maxs[0], maxs[1], maxs[2]],
+                [maxs[0], mins[1], maxs[2]],
+            ]
+            verts = [
+                y_up_to_z_up(scale_to_blender(v, header.axis_multipliers))
+                for v in verts
+            ]
+            edges = []
+            faces: List[Tuple[int, int, int, int]] = [
+                (0, 1, 2, 3),
+                (7, 6, 5, 4),
+            ] if axis == 0 else [
+                (0, 3, 7, 4),
+                (1, 5, 6, 2),
+            ] if axis == 1 else [
+                (0, 4, 5, 1),
+                (2, 6, 7, 3),
+            ]
+            mesh: bpy.types.Mesh = bpy.data.meshes.new(name)
+            mesh.from_pydata(verts, edges, faces)
+            mesh.update()
+            obj: bpy.types.Object = bpy.data.objects.new(name, mesh)
+            obj.display_type = "WIRE"
+            obj.color = color[:]+(1.0,)
+            collection.objects.link(obj)
+            return obj
         color = color_lerp(depth/max_depth, COLOR_SHALLOW, COLOR_DEEP)
-
-        inside_child, outside_child = node.children
-
-        mesh_inside: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}_inside")
-        mesh_inside.from_pydata(verts, edges, faces)
-        mesh_inside.update()
-        obj_inside: bpy.types.Object = bpy.data.objects.new(f"node{node_index}_inside", mesh_inside)
-        obj_inside.display_type = "WIRE"
-        obj_inside.color = color[:]+(1.0,)
-        collection.objects.link(obj_inside)
-
-        obj_outside: bpy.types.Object = bpy.data.objects.new(f"node{node_index}_outside", None)
-        obj_outside.display_type = "WIRE"
-        obj_outside.color = color[:]+(1.0,)
-        collection.objects.link(obj_outside)
-
+        obj_inside = visualise_bounds(
+            name=f"node{node_index}_inside",
+            aabb=inside_bounds,
+            axis=axis,
+            color=color,
+        )
+        obj_outside = visualise_bounds(
+            name=f"node{node_index}_outside",
+            aabb=outside_bounds,
+            axis=axis,
+            color=color,
+        )
         if parent is not None:
             obj_inside.parent = parent
             obj_outside.parent = parent
-        # print(f"generated {node_index=}")
+        inside_child, outside_child = node.children
         generate_debug_visualization(
             bounds=inside_bounds,
             node_index=inside_child,
