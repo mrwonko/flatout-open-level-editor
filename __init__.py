@@ -429,7 +429,7 @@ def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[N
             parent=obj_inside,
         )
         generate_debug_visualization(
-            bounds=bounds,
+            bounds=outside_bounds,
             node_index=outside_child,
             depth=depth+1,
             parent=obj_outside,
