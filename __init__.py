@@ -842,6 +842,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         mesh.update()
         for tri, mat in enumerate(all_material_indices):
             mesh.polygons[tri].material_index = mat
+        # TODO: I could create one face map for each flag, to more easily see faces with each flag
         obj: bpy.types.Object = bpy.data.objects.new(f"collision", mesh)
         collision_collection.objects.link(obj)
 
