@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import mathutils
 import os
 import struct
-from typing import Dict, List, Optional, Set, Tuple, TypeVar, Union
+from typing import Dict, List, NewType, Optional, Set, Tuple, TypeVar, Union
 
 bl_info = {
     "name": "track_cdb2 format",
@@ -22,6 +22,19 @@ VERIFY_REACHABILITY = True
 CHECK_BOUNDS = True
 COLOR_SHALLOW = mathutils.Color((0xD0/0xFF, 0x00/0xFF, 0x70/0xFF))
 COLOR_DEEP = mathutils.Color((0x00/0xFF, 0x32/0xFF, 0xA0/0xFF))
+
+# The keys here match the (1-based) indices in global/dynamics/surfaces.bed
+COLOR_TARMAC = mathutils.Color((.2, .2, .2))
+SURFACE_COLORS: Dict[int, mathutils.Color] = {
+    1: mathutils.Color((1, 0, 1)), # NoCollision
+    2: COLOR_TARMAC, # Tarmac (Road)
+    3: COLOR_TARMAC, # Tarmac Mark (Road) - identical physics as 2 -> same color
+    4: COLOR_TARMAC, # Asphalt (Road) - identical physics as 2 -> same color
+    5: COLOR_TARMAC, # Asphalt Mark (Road) - identical physics as 2 -> same color
+    6: COLOR_TARMAC, # Cement Mark (Road) - identical physics as 2 -> same color
+    7: COLOR_TARMAC, # Cement Mark (Road) - identical physics as 2 -> same color
+    # TODO: more colors
+}
 
 @dataclass
 class Header:
@@ -143,6 +156,8 @@ def scale_to_blender(vert: Union[Tuple[int, int, int], List[int]], multipliers: 
     convert from file format AABB scale (int16) to Blender coordinates
     """
     return [e*m for e, m in zip(vert, multipliers)]
+
+PackedMaterial = NewType("PackedMaterial", int)
 
 @dataclass
 class AABB:
@@ -268,7 +283,7 @@ class Node:
 @dataclass
 class Triangle:
     # the low 6 bit are the node flags, the rest are triangle-specific
-    flags: int
+    flags: PackedMaterial
     vert_indices: Tuple[int, int, int]
 
     def check_bounds(self, node: Node, node_index: int, len_vert_coords: int) -> None:
@@ -456,6 +471,100 @@ class VertexMapping:
         self.index_mapping[idx] = mapping
         return mapping
 
+class MaterialManager:
+    """
+    Keeps track of created materials so we only create one material per flag-combination.
+    """
+    def __init__(self) -> None:
+        self._materials: Dict[PackedMaterial, bpy.types.Material] = {}
+
+    def get_or_create(self, packed_material: PackedMaterial) -> bpy.types.Material:
+        try:
+            return self._materials[packed_material]
+        except KeyError:
+            mat = self._create(packed_material)
+            self._materials[packed_material] = mat
+            return mat
+
+    def _create(self, packed_material: PackedMaterial) -> bpy.types.Material:
+        # we're using Lua-style 1-based indices here to match the indices in surfaces.bed
+        surface = (packed_material & ones(6)) + 1
+        loflags = (packed_material >> 8) & ones(6)
+        hiflags =  (packed_material >> 8+8) & ones(2)
+        flags = hiflags << 6 | loflags
+        # TODO find out what each flag means and decide how to display them.
+        # For now, I group the flags like they are in the packed data.
+        name = f"col_{surface}_{hiflags:>02b}_{loflags:>06b}"
+        # re-use existing material with matching name, if any
+        if (mat := bpy.data.materials.get(name)) is not None:
+            return mat
+        # TODO: try lookup first
+        mat = bpy.data.materials.new(name)
+        # if available, assign a color
+        # TODO: customisable colors?
+        try:
+            mat.diffuse_color = SURFACE_COLORS[surface][:]+(1.0,)
+        except KeyError:
+            pass
+        # TODO: visualise the flags in the material somehow?
+        # we use custom properties as defined below for FlatOut 2 specific data
+        mat.fo2_collision_surface = surface
+        mat.fo2_collision_flags = [flags & (1 << b) != 0 for b in range(8)]
+        return mat
+
+    @staticmethod
+    def add_properties() -> None:
+        bpy.types.Material.fo2_collision_surface = bpy.props.IntProperty(
+            name="FO2 Collision Surface",
+            description="For FlatOut 2 track collision meshes: reference into the Surfaces defined in global/dynamics/surfaces.bed",
+            # Like Lua, we use 1-based indices.
+            min=1,
+            # In the file, we convert to 0-based indices, but here the maximum is 64, not 63.
+            max=1 << 6,
+            default=1,
+            )
+        bpy.types.Material.fo2_collision_flags = bpy.props.BoolVectorProperty(
+            name="FO2 Collision Flags",
+            description="For FlatOut 2 track collision meshes: flags with unknown meaning. The first 6 seem to form a group, the final one defaults to 0 in some encodings.",
+            size=6+2,
+            # TODO: find good defaults
+            default=[False]*(6+2),
+            subtype="LAYER",
+        )
+
+    @staticmethod
+    def remove_properties() -> None:
+        bpy.props.RemoveProperty(bpy.types.Material, attr="fo2_collision_flags")
+        bpy.props.RemoveProperty(bpy.types.Material, attr="fo2_collision_surface")
+
+class MeshMaterialManager:
+    """
+    Keeps track of the materials used by a mesh.
+    """
+    def __init__(self, mesh: bpy.types.Mesh, material_manager: MaterialManager) -> None:
+        self._mesh = mesh
+        self._material_manager = material_manager
+        self._materials: Dict[PackedMaterial, int] = {}
+
+    def fetch(self, packed_material: PackedMaterial) -> int:
+        """
+        If the mesh already uses this material, returns its index.
+        Otherwise, uses the MaterialManager to get or create the material,
+        adds it to the mesh's materials, and returns its new index.
+        """
+        try:
+            return self._materials[packed_material]
+        except KeyError:
+            mat = self._material_manager.get_or_create(packed_material)
+            assert mat is not None
+            # I don't really understand how adding new materials in Blender works
+            # Apparently the object material slots get created automatically
+            # as materials get added to the object's mesh.
+            idx = len(self._mesh.materials)
+            self._materials[packed_material] = idx
+            self._mesh.materials.append(mat)
+            return idx
+
 def import_file(filename: str, enable_debug_visualization: bool = False):
     file_stats = os.stat(filename)
     file_size = file_stats.st_size
@@ -488,8 +597,10 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         if VERIFY_REACHABILITY:
             verify_reachability(nodes)
 
-        collision_collection = bpy.data.collections.new('collision')
-        bpy.context.scene.collection.children.link(collision_collection)
+        collision_collection = bpy.data.collections.get('collision')
+        if collision_collection is None:
+            collision_collection = bpy.data.collections.new('collision')
+            bpy.context.scene.collection.children.link(collision_collection)
         if enable_debug_visualization:
             generate_debug_visualisation(
                 collection=collision_collection,
@@ -529,6 +640,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         # at this point, we're done reading from the file
 
     # now that we have all necessary data in memory, we can build the geometry
+    material_manager = MaterialManager()
     if not enable_debug_visualization:
         # usually, we combine everything into a single mesh,
         # because Blender doesn't like having lots of objects,
@@ -537,7 +649,10 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         # then we want one object per node.
         vertex_mapping = VertexMapping(header=header, vertex_coords=vertex_coords)
         all_mapped_tris: List[List[int]] = []
-    all_flags: Set[int] = set()
+        all_material_indices: List[int] = []
+        mesh: bpy.types.Mesh = bpy.data.meshes.new(f"collision")
+        mesh_material_manager = MeshMaterialManager(mesh, material_manager)
+    all_flags: Set[PackedMaterial] = set()
     for (node_index, node) in enumerate(nodes):
         if not node.is_leaf or node.num_triangles == 0:
             continue
@@ -556,7 +671,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         if node.leaf_kind == 0:
             triangles.append(Triangle(
                 # 6 + 6 + 2 bit
-                flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                 vert_indices=(
                     # 19 bit
                     vert_offset,
@@ -572,7 +687,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(1, node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 2 bit
-                    flags=(get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                    flags=PackedMaterial((get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                     vert_indices=(
                         # 19 bit
                         get(1) >> 7 | get(2) << 1 | get(3) << 1+8 | (get(4) & ones(2)) << 1+8+8,
@@ -587,7 +702,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         elif node.leaf_kind == 1:
             triangles.append(Triangle(
                 # 6 + 6 + 2 bit
-                flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                 vert_indices=(
                     # 19 bit
                     vert_offset,
@@ -602,7 +717,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(1, node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 1 bit
-                    flags=node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) >> 6) & ones(1)) << 8+8,
+                    flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) >> 6) & ones(1)) << 8+8),
                     vert_indices=(
                         # 19 bit
                         get(0) >> 7 | get(1) << 1 | get(2) << 1+8 | (get(3) & ones(2)) << 1+8+8,
@@ -618,7 +733,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 2 bit
-                    flags=(get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                    flags=PackedMaterial((get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                     vert_indices=(
                         # because we only use a single byte of triangle data,
                         # we can only reference a range of 256 consecutive vertices
@@ -636,7 +751,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 2 bit
-                    flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                    flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                     vert_indices=(
                         # 8 bit
                         vert_offset + get(1),
@@ -652,7 +767,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 1 bit
-                    flags=node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) & ones(1)) >> 6) << 8+8,
+                    flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) & ones(1)) >> 6) << 8+8),
                     vert_indices=(
                         # 12 bit
                         vert_offset + (get(0) >> 7 | get(1) << 1 | (get(2) & ones(2)) << 1+8),
@@ -668,7 +783,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 2 bit
-                    flags=node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8,
+                    flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                     vert_indices=(
                         # 5 bit
                         vert_offset + (get(1) & ones(5)),
@@ -688,6 +803,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             if enable_debug_visualization:
                 # to visualise the tree, use a separate object attached
                 vertex_mapping = VertexMapping(header=header, vertex_coords=vertex_coords)
+                mesh: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}")
+                mesh_material_manager = MeshMaterialManager(mesh, material_manager)
 
             mapped_tris = [
                 [vertex_mapping.lookup(idx) for idx in tri.vert_indices]
@@ -695,40 +812,55 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             ]
             # flip triangles
             mapped_tris = [list(reversed(tri)) for tri in mapped_tris]
+
+            # set up materials
+            material_indices = [mesh_material_manager.fetch(t.flags) for t in triangles]
             all_flags.update(map(lambda t: t.flags, triangles))
 
             if enable_debug_visualization:
-                mesh: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}")
                 mesh.from_pydata(
                     vertex_mapping.mapped_verts,
                     (),
                     mapped_tris,
                 )
                 mesh.update()
+                for tri, mat in enumerate(material_indices):
+                    mesh.polygons[tri].material_index = mat
                 obj: bpy.types.Object = bpy.data.objects.new(f"node{node_index}", mesh)
                 collision_collection.objects.link(obj)
                 if node.debug_parent is not None:
                     obj.parent = node.debug_parent
             else:
                 all_mapped_tris.extend(mapped_tris)
+                all_material_indices.extend(material_indices)
     if not enable_debug_visualization:
-        mesh: bpy.types.Mesh = bpy.data.meshes.new(f"collision")
         mesh.from_pydata(
             vertex_mapping.mapped_verts,
             (),
             all_mapped_tris,
         )
         mesh.update()
+        for tri, mat in enumerate(all_material_indices):
+            mesh.polygons[tri].material_index = mat
         obj: bpy.types.Object = bpy.data.objects.new(f"collision", mesh)
         collision_collection.objects.link(obj)
 
     # debug print for me, the developer :)
+    # possibly reference to global/dynamics/surfaces.bed? (1-49)
+    material_byte0s: Set[int] = set()
+    # probably bitflags, most values from 0-63 occur
+    material_byte1s: Set[int] = set()
+    for material in all_flags:
+        material_byte0s.add(material & ones(8))
+        material_byte1s.add((material >> 8) & ones(8))
     print(f"""file info:
 {header=}
 {len(nodes)=}
 seen_bitmask={seen_bitmask:b}
 {kind_counts=}
 {all_flags=} ({len(all_flags)} total)
+{sorted(material_byte0s)=}
+{sorted(material_byte1s)=}
 
 {enable_debug_visualization=}
 """)
@@ -760,7 +892,9 @@ def import_menu_func(self, context):
 
 def register():
     bpy.utils.register_class(ImportOperator)
+    MaterialManager.add_properties()
     bpy.types.TOPBAR_MT_file_import.append(import_menu_func)
 def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(import_menu_func)
+    MaterialManager.remove_properties()
     bpy.utils.unregister_class(ImportOperator)
