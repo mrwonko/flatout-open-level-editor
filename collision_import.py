@@ -7,6 +7,7 @@ import struct
 from typing import Dict, List, NewType, Optional, Set, Tuple, TypeVar, Union
 from . import cdb2, config
 from .bitmath import ones
+from .aabb import AABB
 
 
 @dataclass
@@ -146,15 +147,6 @@ def scale_to_blender(vert: Union[Tuple[int, int, int], List[int]], multipliers: 
 
 
 PackedMaterial = NewType("PackedMaterial", int)
-
-
-@dataclass
-class AABB:
-    min: mathutils.Vector
-    max: mathutils.Vector
-
-    def copy(self) -> "AABB":
-        return AABB(self.min.copy(), self.max.copy())
 
 
 class Node:
