@@ -19,15 +19,23 @@ COLOR_DEEP = mathutils.Color((0x00/0xFF, 0x32/0xFF, 0xA0/0xFF))
 # The keys here match the (1-based) indices in global/dynamics/surfaces.bed
 COLOR_TARMAC = mathutils.Color((.2, .2, .2))
 SURFACE_COLORS: Dict[int, mathutils.Color] = {
-    1: mathutils.Color((1, 0, 1)), # NoCollision
-    2: COLOR_TARMAC, # Tarmac (Road)
-    3: COLOR_TARMAC, # Tarmac Mark (Road) - identical physics as 2 -> same color
-    4: COLOR_TARMAC, # Asphalt (Road) - identical physics as 2 -> same color
-    5: COLOR_TARMAC, # Asphalt Mark (Road) - identical physics as 2 -> same color
-    6: COLOR_TARMAC, # Cement Mark (Road) - identical physics as 2 -> same color
-    7: COLOR_TARMAC, # Cement Mark (Road) - identical physics as 2 -> same color
+    # NoCollision
+    1: mathutils.Color((1, 0, 1)),
+    # Tarmac (Road)
+    2: COLOR_TARMAC,
+    # Tarmac Mark (Road) - identical physics as 2 -> same color
+    3: COLOR_TARMAC,
+    # Asphalt (Road) - identical physics as 2 -> same color
+    4: COLOR_TARMAC,
+    # Asphalt Mark (Road) - identical physics as 2 -> same color
+    5: COLOR_TARMAC,
+    # Cement Mark (Road) - identical physics as 2 -> same color
+    6: COLOR_TARMAC,
+    # Cement Mark (Road) - identical physics as 2 -> same color
+    7: COLOR_TARMAC,
     # TODO: more colors
 }
+
 
 @dataclass
 class Header:
@@ -76,7 +84,8 @@ class Header:
         Afterwards, the reader will be positioned after the header,
         i.e. at the start of the AABB tree data.
         """
-        assert f.tell() == 0, f"expected header at start of file, got offset {f.tell()}"
+        assert f.tell() == 0, \
+            f"expected header at start of file, got offset {f.tell()}"
         res = Header(
             file_id=struct.unpack("<4s", f.read(4))[0],
             version=struct.unpack("<i", f.read(4))[0],
@@ -88,50 +97,62 @@ class Header:
             relative_ofs_vertices=struct.unpack("<I", f.read(4))[0],
             file_size=file_size,
         )
-        assert f.tell() == HEADER_SIZE, f"should have consumed {HEADER_SIZE} bytes after header, not {f.tell()}"
+        assert f.tell() == HEADER_SIZE, \
+            f"should have consumed {HEADER_SIZE} bytes after header, not {f.tell()}"
         if res.file_id != FILE_ID:
-            raise ValueError(f'bad magic header, want {FILE_ID}, got {res.file_id}')
+            raise ValueError(
+                f'bad magic header, want {FILE_ID}, got {res.file_id}')
         if res.version != VERSION:
             # note that I'm not 100% certain this is a version number,
             # but it's always 0 in my experience.
-            raise ValueError(f'bad file version, want {VERSION}, got {res.version}')
+            raise ValueError(
+                f'bad file version, want {VERSION}, got {res.version}')
         # if this ever happens, len_triangles and len_vertices need to be adjusted.
-        assert res.relative_ofs_triangles <= res.relative_ofs_vertices, "this importer assumes the triangle data comes before the vertex data and needs to be adjusted to support this file"
+        assert res.relative_ofs_triangles <= res.relative_ofs_vertices, \
+            "this importer assumes the triangle data comes before the vertex data and needs to be adjusted to support this file"
         return res
 
     @property
     def ofs_tree(self) -> int:
         """Offset in the reader where the AABB tree data starts"""
         return HEADER_SIZE
+
     @property
     def ofs_triangles(self) -> int:
         """Offset in the reader where the packed triangle data starts."""
         return self.relative_ofs_triangles + HEADER_SIZE
+
     @property
     def ofs_vertices(self) -> int:
         """Offset in the reader where the vertex coordinate data starts."""
         return self.relative_ofs_vertices + HEADER_SIZE
+
     @property
     def len_tree(self) -> int:
         """Size of the AABB tree data in bytes."""
         # assumes triangles come directly after the tree
         return self.ofs_triangles - self.ofs_tree
+
     @property
     def len_triangles(self) -> int:
         """Size of the triangle data in bytes."""
         # assumes vertices come directly after the triangles
         return self.ofs_vertices - self.ofs_triangles
+
     @property
     def len_vertices(self) -> int:
         """Size of the vertex data in bytes."""
         # assumes vertices continue until the end of the file
         return self.file_size - self.ofs_vertices
 
+
 def color_lerp(f: float, c1: mathutils.Color, c2: mathutils.Color) -> mathutils.Color:
     """Linear interpolation between c1 (f=0) and c2 (f=1)"""
     return (c1 * (1.0-f)) + (c2 * f)
 
+
 T = TypeVar('T')
+
 
 def y_up_to_z_up(vert: List[T]) -> List[T]:
     """
@@ -144,13 +165,16 @@ def y_up_to_z_up(vert: List[T]) -> List[T]:
         vert[1],
     ]
 
+
 def scale_to_blender(vert: Union[Tuple[int, int, int], List[int]], multipliers: List[float]) -> List[float]:
     """
     convert from file format AABB scale (int16) to Blender coordinates
     """
     return [e*m for e, m in zip(vert, multipliers)]
 
+
 PackedMaterial = NewType("PackedMaterial", int)
+
 
 @dataclass
 class AABB:
@@ -160,13 +184,16 @@ class AABB:
     def copy(self) -> "AABB":
         return AABB(self.min.copy(), self.max.copy())
 
+
 def ones(n: int) -> int:
     """Returns a bitmask where the lowest n bits are 1."""
-    return (1<<n)-1
+    return (1 << n)-1
+
 
 class Node:
     def __init__(self, data: bytes, index: int, header: Header) -> None:
-        assert len(data) == NODE_SIZE, f'expected {NODE_SIZE} bytes, not {len(data)}'
+        assert len(data) == NODE_SIZE, \
+            f'expected {NODE_SIZE} bytes, not {len(data)}'
         AXIS_BITS = 2
         # I'm not entirely sure if the nomenclature is correct here,
         # but I'm calling the first dword lo(w) and the second one hi(gh)
@@ -189,14 +216,14 @@ class Node:
             lo >>= MASK_BITS
             self._kind = lo & ones(KIND_BITS)
             lo >>= KIND_BITS
-            self._triangle_offset = lo # 32-2-4-3 = 23 bit
+            self._triangle_offset = lo  # 32-2-4-3 = 23 bit
             hi: int
             hi, = struct.unpack("<I", data[4:])
             self._num_triangles = hi & ones(COUNT_BITS)
             hi >>= COUNT_BITS
             self._flags = hi & ones(FLAGS_BITS)
             hi >>= FLAGS_BITS
-            self._vert_offset = hi # 19 bit
+            self._vert_offset = hi  # 19 bit
             self.triangles: Optional[List[Triangle]] = None
         else:
             # 24b child offset, 6b mask, 2b axis
@@ -208,28 +235,34 @@ class Node:
             self.bitmask = lo & ones(MASK_BITS)
             lo >>= MASK_BITS
             child0_offset = lo
-            assert child0_offset % NODE_SIZE == 0, f'unexpected node offset {child0_offset} is not a multiple of {NODE_SIZE}'
+            assert child0_offset % NODE_SIZE == 0,\
+                f'unexpected node offset {child0_offset} is not a multiple of {NODE_SIZE}'
             self._child0_index = child0_offset // NODE_SIZE
             self._max: int
             self._min: int
             self._max, self._min = struct.unpack("<2h", data[4:])
-            assert (self.children[0] + 1) * NODE_SIZE <= header.len_tree, f"leaf {index} first child {self.children[0]} out of range {header.len_tree//NODE_SIZE}"
-            assert (self.children[1] + 1) * NODE_SIZE <= header.len_tree, f"leaf {index} second child {self.children[1]} out of range {header.len_tree//NODE_SIZE}"
+            assert (self.children[0] + 1) * NODE_SIZE <= header.len_tree, \
+                f"leaf {index} first child {self.children[0]} out of range {header.len_tree//NODE_SIZE}"
+            assert (self.children[1] + 1) * NODE_SIZE <= header.len_tree, \
+                f"leaf {index} second child {self.children[1]} out of range {header.len_tree//NODE_SIZE}"
 
     @property
     def is_leaf(self) -> bool:
         """Axis 0-2 are inner nodes, axis 3 marks leafs."""
         return self.axis == 3
+
     @property
     def children(self) -> Tuple[int, int]:
         """Only for non-leafs: indices of child nodes"""
         assert not self.is_leaf, 'leafs have no children'
         return self._child0_index, self._child0_index+1
+
     @property
     def num_triangles(self) -> int:
         """Only for leafs: number of triangles contained"""
         assert self.is_leaf, 'only leafs have triangles'
         return self._num_triangles
+
     @property
     def triangle_offset(self) -> int:
         """
@@ -237,15 +270,18 @@ class Node:
         """
         assert self.is_leaf, 'only leafs have triangles'
         return self._triangle_offset
+
     @property
     def leaf_kind(self) -> int:
         assert self.is_leaf, 'only leafs have kinds'
         return self._kind
+
     @property
     def leaf_flags(self) -> int:
         """Only for leafs: the 6 flag bits."""
         assert self.is_leaf, 'only leafs have flags'
         return self._flags
+
     @property
     def vert_offset(self) -> int:
         '''
@@ -254,6 +290,7 @@ class Node:
         '''
         assert self.is_leaf, 'only leafs have vertex offset'
         return self._vert_offset
+
     @property
     def max(self) -> int:
         """
@@ -263,6 +300,7 @@ class Node:
         """
         assert not self.is_leaf, 'leafs have no maximum'
         return self._max
+
     @property
     def min(self) -> int:
         """
@@ -273,6 +311,7 @@ class Node:
         assert not self.is_leaf, 'leafs have no minimum'
         return self._min
 
+
 @dataclass
 class Triangle:
     # the low 6 bit are the node flags, the rest are triangle-specific
@@ -281,7 +320,9 @@ class Triangle:
 
     def check_bounds(self, node: Node, node_index: int, len_vert_coords: int) -> None:
         for axis, idx in enumerate(self.vert_indices):
-            assert idx+2 < len_vert_coords, f"node {node_index} (kind {node.leaf_kind}) axis {axis} vertex index {idx} out of range (max {len_vert_coords-2})"
+            assert idx + 2 < len_vert_coords, \
+                f"node {node_index} (kind {node.leaf_kind}) axis {axis} vertex index {idx} out of range (max {len_vert_coords-2})"
+
 
 def test_bitmask(nodes: List[Node]) -> None:
     """
@@ -291,12 +332,14 @@ def test_bitmask(nodes: List[Node]) -> None:
     """
     def check_tree_bitmasks(root_index: int, expected: int) -> None:
         root = nodes[root_index]
-        assert root.bitmask & expected == root.bitmask, f"node {root_index} bitmask {root.bitmask:b} does not fit expected pattern {expected:b}"
+        assert root.bitmask & expected == root.bitmask, \
+            f"node {root_index} bitmask {root.bitmask:b} does not fit expected pattern {expected:b}"
         if root.is_leaf:
             return
         check_tree_bitmasks(root.children[0], root.bitmask)
         check_tree_bitmasks(root.children[1], root.bitmask)
-    check_tree_bitmasks(0, (1<<32)-1)
+    check_tree_bitmasks(0, (1 << 32)-1)
+
 
 def verify_reachability(nodes: List[Node]) -> None:
     """
@@ -305,6 +348,7 @@ def verify_reachability(nodes: List[Node]) -> None:
     Raises an AssertionError if the assumption is wrong.
     """
     reachable = [False] * len(nodes)
+
     def check_reachability(root_index: int) -> None:
         reachable[root_index] = True
         root = nodes[root_index]
@@ -314,7 +358,9 @@ def verify_reachability(nodes: List[Node]) -> None:
         check_reachability(root.children[1])
     check_reachability(0)
     unreachable = [i for i, r in enumerate(reachable) if not r]
-    assert len(unreachable) == 0, f'found {len(unreachable)} orphan node(s), first ten: {unreachable[:10]}'
+    assert len(unreachable) == 0, \
+        f'found {len(unreachable)} orphan node(s), first ten: {unreachable[:10]}'
+
 
 def check_bounds(nodes: List[Node], len_triangle_data: int, len_vertex_coords: int):
     """
@@ -328,7 +374,9 @@ def check_bounds(nodes: List[Node], len_triangle_data: int, len_vertex_coords: i
             assert node.vert_offset < len_vertex_coords, f"node {node_index} vert_offset {node.vert_offset} is out of range [0, {len_vertex_coords}]"
         else:
             assert node.children[0] >= 0, f"node {node_index} inner child index {node.children[0]} is negative"
-            assert node.children[1] < len(nodes), f"node {node_index} outer child index {node.children[1]} is above {len(nodes)}"
+            assert node.children[1] < len(nodes), \
+                f"node {node_index} outer child index {node.children[1]} is above {len(nodes)}"
+
 
 def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[Node], header: Header) -> None:
     """
@@ -361,6 +409,7 @@ def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[N
         outside_bounds = bounds.copy()
         outside_bounds.min[axis] = node.min
         inside_bounds.max[axis] = node.max
+
         def visualise_bounds(name: str, aabb: AABB, axis: int, color: mathutils.Color) -> bpy.types.Object:
             mins = aabb.min
             maxs = aabb.max
@@ -429,11 +478,13 @@ def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[N
         )
 
     generate_debug_visualization(
-        bounds=AABB(mathutils.Vector(header.mins), mathutils.Vector(header.maxs)),
+        bounds=AABB(mathutils.Vector(header.mins),
+                    mathutils.Vector(header.maxs)),
         node_index=0,
         depth=0,
         parent=None,
     )
+
 
 class VertexMapping:
     def __init__(self, header: Header, vertex_coords: List[int]) -> None:
@@ -445,7 +496,8 @@ class VertexMapping:
     def lookup(self, idx: int) -> int:
         if idx in self.index_mapping:
             return self.index_mapping[idx]
-        assert idx < len(self.vertex_coords), f"vertex index {idx} out of range, there are {len(self.vertex_coords)} vertices totalling {self.header.len_vertices} bytes"
+        assert idx < len(self.vertex_coords), \
+            f"vertex index {idx} out of range, there are {len(self.vertex_coords)} vertices totalling {self.header.len_vertices} bytes"
         mapping = len(self.mapped_verts)
         # TODO simplify the vertex handling
         # it's confusing that we treat vertices as individual scalars up to here
@@ -464,10 +516,12 @@ class VertexMapping:
         self.index_mapping[idx] = mapping
         return mapping
 
+
 class MaterialManager:
     """
     Keeps track of created materials so we only create one material per flag-combination.
     """
+
     def __init__(self) -> None:
         self._materials: Dict[PackedMaterial, bpy.types.Material] = {}
 
@@ -483,7 +537,7 @@ class MaterialManager:
         # we're using Lua-style 1-based indices here to match the indices in surfaces.bed
         surface = (packed_material & ones(6)) + 1
         loflags = (packed_material >> 8) & ones(6)
-        hiflags =  (packed_material >> 8+8) & ones(2)
+        hiflags = (packed_material >> 8+8) & ones(2)
         flags = hiflags << 6 | loflags
         # TODO find out what each flag means and decide how to display them.
         # For now, I group the flags like they are in the packed data.
@@ -515,7 +569,7 @@ class MaterialManager:
             # In the file, we convert to 0-based indices, but here the maximum is 64, not 63.
             max=1 << 6,
             default=1,
-            )
+        )
         bpy.types.Material.fo2_collision_flags = bpy.props.BoolVectorProperty(
             name="FO2 Collision Flags",
             description="For FlatOut 2 track collision meshes: flags with unknown meaning. The first 6 seem to form a group, the final one defaults to 0 in some encodings.",
@@ -527,13 +581,17 @@ class MaterialManager:
 
     @staticmethod
     def remove_properties() -> None:
-        bpy.props.RemoveProperty(bpy.types.Material, attr="fo2_collision_flags")
-        bpy.props.RemoveProperty(bpy.types.Material, attr="fo2_collision_surface")
+        bpy.props.RemoveProperty(
+            bpy.types.Material, attr="fo2_collision_flags")
+        bpy.props.RemoveProperty(
+            bpy.types.Material, attr="fo2_collision_surface")
+
 
 class MeshMaterialManager:
     """
     Keeps track of the materials used by a mesh.
     """
+
     def __init__(self, mesh: bpy.types.Mesh, material_manager: MaterialManager) -> None:
         self._mesh = mesh
         self._material_manager = material_manager
@@ -558,6 +616,7 @@ class MeshMaterialManager:
             self._mesh.materials.append(mat)
             return idx
 
+
 def import_file(filename: str, enable_debug_visualization: bool = False):
     file_stats = os.stat(filename)
     file_size = file_stats.st_size
@@ -580,7 +639,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             node = Node(f.read(NODE_SIZE), len(nodes), header)
             # collect some debugging stats
             if node.is_leaf:
-                kind_counts[node.leaf_kind] = kind_counts.get(node.leaf_kind, 0) + 1
+                kind_counts[node.leaf_kind] = kind_counts.get(
+                    node.leaf_kind, 0) + 1
             seen_bitmask |= node.bitmask
             nodes.append(node)
 
@@ -622,7 +682,6 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(0, header.len_vertices, 2)
         ]
 
-
         if CHECK_BOUNDS:
             check_bounds(
                 nodes=nodes,
@@ -640,7 +699,10 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         # and because there is no useful meaning in those objects anyway
         # - except when we want to visualise the AABB tree,
         # then we want one object per node.
-        vertex_mapping = VertexMapping(header=header, vertex_coords=vertex_coords)
+        vertex_mapping = VertexMapping(
+            header=header,
+            vertex_coords=vertex_coords,
+        )
         all_mapped_tris: List[List[int]] = []
         all_material_indices: List[int] = []
         mesh: bpy.types.Mesh = bpy.data.meshes.new(f"collision")
@@ -653,6 +715,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         # 19 bit
         vert_offset = node.vert_offset
         iter = node.triangle_offset
+
         def get(i: int = 0) -> int:
             """
             Iterator lookup with offset.
@@ -664,7 +727,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         if node.leaf_kind == 0:
             triangles.append(Triangle(
                 # 6 + 6 + 2 bit
-                flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
+                flags=PackedMaterial(
+                    node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                 vert_indices=(
                     # 19 bit
                     vert_offset,
@@ -680,22 +744,26 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(1, node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 2 bit
-                    flags=PackedMaterial((get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
+                    flags=PackedMaterial(
+                        (get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                     vert_indices=(
                         # 19 bit
-                        get(1) >> 7 | get(2) << 1 | get(3) << 1+8 | (get(4) & ones(2)) << 1+8+8,
+                        get(1) >> 7 | get(2) << 1 | get(3) << 1 + \
+                        8 | (get(4) & ones(2)) << 1+8+8,
                         # 19 bit
                         get(4) >> 2 | get(5) << 6 | (get(6) & ones(5)) << 6+8,
                         # 19 bit
                         get(6) >> 5 | get(7) << 3 | get(8) << 3+8,
                     ),
                 ))
-                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                triangles[-1].check_bounds(node,
+                                           node_index, len(vertex_coords))
                 iter += 9
         elif node.leaf_kind == 1:
             triangles.append(Triangle(
                 # 6 + 6 + 2 bit
-                flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
+                flags=PackedMaterial(
+                    node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                 vert_indices=(
                     # 19 bit
                     vert_offset,
@@ -710,23 +778,27 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(1, node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 1 bit
-                    flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) >> 6) & ones(1)) << 8+8),
+                    flags=PackedMaterial(
+                        node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) >> 6) & ones(1)) << 8+8),
                     vert_indices=(
                         # 19 bit
-                        get(0) >> 7 | get(1) << 1 | get(2) << 1+8 | (get(3) & ones(2)) << 1+8+8,
+                        get(0) >> 7 | get(1) << 1 | get(2) << 1 + \
+                        8 | (get(3) & ones(2)) << 1+8+8,
                         # 19 bit
                         get(3) >> 2 | get(4) << 6 | (get(5) & ones(5)) << 6+8,
                         # 19 bit
                         get(5) >> 5 | get(6) << 3 | get(7) << 3+8,
                     ),
                 ))
-                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                triangles[-1].check_bounds(node,
+                                           node_index, len(vertex_coords))
                 iter += 8
         elif node.leaf_kind == 2:
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 2 bit
-                    flags=PackedMaterial((get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
+                    flags=PackedMaterial(
+                        (get(1) & ones(6)) | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                     vert_indices=(
                         # because we only use a single byte of triangle data,
                         # we can only reference a range of 256 consecutive vertices
@@ -738,13 +810,17 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         vert_offset + get(4),
                     ),
                 ))
-                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                triangles[-1].check_bounds(
+                    node,
+                    node_index,
+                    len(vertex_coords))
                 iter += 5
         elif node.leaf_kind == 3:
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 2 bit
-                    flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
+                    flags=PackedMaterial(
+                        node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                     vert_indices=(
                         # 8 bit
                         vert_offset + get(1),
@@ -754,29 +830,34 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         vert_offset + get(3),
                     ),
                 ))
-                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                triangles[-1].check_bounds(node,
+                                           node_index, len(vertex_coords))
                 iter += 4
         elif node.leaf_kind == 4:
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 1 bit
-                    flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) & ones(1)) >> 6) << 8+8),
+                    flags=PackedMaterial(
+                        node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) & ones(1)) >> 6) << 8+8),
                     vert_indices=(
                         # 12 bit
-                        vert_offset + (get(0) >> 7 | get(1) << 1 | (get(2) & ones(2)) << 1+8),
+                        vert_offset + \
+                        (get(0) >> 7 | get(1) << 1 | (get(2) & ones(2)) << 1+8),
                         # 12 bit
                         vert_offset + (get(2) >> 2 | (get(3) & ones(5)) << 6),
                         # 11 bit
                         vert_offset + (get(3) >> 5 | get(4) << 3),
                     ),
                 ))
-                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                triangles[-1].check_bounds(node,
+                                           node_index, len(vertex_coords))
                 iter += 5
         elif node.leaf_kind == 5:
             for i in range(node.num_triangles):
                 triangles.append(Triangle(
                     # 6 + 6 + 2 bit
-                    flags=PackedMaterial(node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
+                    flags=PackedMaterial(
+                        node.leaf_flags | (get(0) & ones(6)) << 8 | (get(0) >> 6) << 8+8),
                     vert_indices=(
                         # 5 bit
                         vert_offset + (get(1) & ones(5)),
@@ -786,18 +867,25 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         vert_offset + (get(2) >> 2),
                     ),
                 ))
-                triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+                triangles[-1].check_bounds(
+                    node,
+                    node_index,
+                    len(vertex_coords))
                 iter += 3
         else:
-            raise ValueError(f"invalid kind {node.leaf_kind} on leaf {node_index}")
+            raise ValueError(
+                f"invalid kind {node.leaf_kind} on leaf {node_index}")
         if len(triangles) > 0:
             # Blender uses per-object vertex buffers,
             # so we copy the relevant vertices to our own buffer
             if enable_debug_visualization:
                 # to visualise the tree, use a separate object attached
-                vertex_mapping = VertexMapping(header=header, vertex_coords=vertex_coords)
+                vertex_mapping = VertexMapping(
+                    header=header,
+                    vertex_coords=vertex_coords)
                 mesh: bpy.types.Mesh = bpy.data.meshes.new(f"node{node_index}")
-                mesh_material_manager = MeshMaterialManager(mesh, material_manager)
+                mesh_material_manager = MeshMaterialManager(
+                    mesh, material_manager)
 
             mapped_tris = [
                 [vertex_mapping.lookup(idx) for idx in tri.vert_indices]
@@ -807,7 +895,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             mapped_tris = [list(reversed(tri)) for tri in mapped_tris]
 
             # set up materials
-            material_indices = [mesh_material_manager.fetch(t.flags) for t in triangles]
+            material_indices = [
+                mesh_material_manager.fetch(t.flags) for t in triangles]
             all_flags.update(map(lambda t: t.flags, triangles))
 
             if enable_debug_visualization:
@@ -819,7 +908,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                 mesh.update()
                 for tri, mat in enumerate(material_indices):
                     mesh.polygons[tri].material_index = mat
-                obj: bpy.types.Object = bpy.data.objects.new(f"node{node_index}", mesh)
+                obj: bpy.types.Object = bpy.data.objects.new(
+                    f"node{node_index}", mesh)
                 collision_collection.objects.link(obj)
                 if node.debug_parent is not None:
                     obj.parent = node.debug_parent
@@ -859,35 +949,44 @@ seen_bitmask={seen_bitmask:b}
 {enable_debug_visualization=}
 """)
 
+
 class ImportOperator(bpy.types.Operator):
     bl_idname = "import_scene.fo2_track_cbd2_gen"
     bl_label = "Import FlatOut 2 track_cdb2.gen"
 
-    #gets set by the file select window - internal Blender Magic or whatever.
-    filepath: bpy.props.StringProperty(name="File Path", description="File path used for importing the track_cdb2.gen file", maxlen= 1024, default="")
+    # gets set by the file select window - internal Blender Magic or whatever.
+    filepath: bpy.props.StringProperty(
+        name="File Path", description="File path used for importing the track_cdb2.gen file", maxlen=1024, default="")
 
-    enable_debug_visualization: bpy.props.BoolProperty(name="Debug Visualization", description="Imports the collision tree. The tree is automatically rebuilt on export, this is only for debugging.", default=False)
+    enable_debug_visualization: bpy.props.BoolProperty(
+        name="Debug Visualization", description="Imports the collision tree. The tree is automatically rebuilt on export, this is only for debugging.", default=False)
 
     def execute(self, context):
         self.ImportStart()
         return {'FINISHED'}
 
     def invoke(self, context, event):
-        #sets self.properties.filename and runs self.execute()
+        # sets self.properties.filename and runs self.execute()
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
     def ImportStart(self):
-        import_file(self.properties.filepath, enable_debug_visualization=self.properties.enable_debug_visualization)
-        #self.report( { 'ERROR' }, f'import of {self.properties.filepath} not yet implemented')
+        import_file(self.properties.filepath,
+                    enable_debug_visualization=self.properties.enable_debug_visualization)
+        # self.report( { 'ERROR' }, f'import of {self.properties.filepath} not yet implemented')
+
 
 def import_menu_func(self, context):
-    self.layout.operator(ImportOperator.bl_idname, text="FlatOut 2 track_cdb2.gen")
+    self.layout.operator(ImportOperator.bl_idname,
+                         text="FlatOut 2 track_cdb2.gen")
+
 
 def register():
     bpy.utils.register_class(ImportOperator)
     MaterialManager.add_properties()
     bpy.types.TOPBAR_MT_file_import.append(import_menu_func)
+
+
 def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(import_menu_func)
     MaterialManager.remove_properties()
