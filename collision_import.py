@@ -153,46 +153,36 @@ class Node:
     def __init__(self, data: bytes, index: int, header: Header) -> None:
         assert len(data) == cdb2.NODE_SIZE, \
             f'expected {cdb2.NODE_SIZE} bytes, not {len(data)}'
-        AXIS_BITS = 2
         # I'm not entirely sure if the nomenclature is correct here,
         # but I'm calling the first dword lo(w) and the second one hi(gh)
         lo: int
         lo, = struct.unpack("<I", data[:4])
-        self.axis = lo & ones(AXIS_BITS)
-        lo >>= AXIS_BITS
+        self.axis = lo & ones(cdb2.AXIS_BITS)
+        lo >>= cdb2.AXIS_BITS
         # if we generated a debug visualisation, this is the node's parent.
         # attach collision geometry to the same parent.
         self.debug_parent: Optional[bpy.types.Object] = None
         if self.is_leaf:
-            # 23b triangle start, 3b kind, 4b mask, 2b axis (=3)
-            MASK_BITS = 4
-            KIND_BITS = 3
-            # 19b vertex offset, 6b flags, 7b triangle count
-            COUNT_BITS = 7
-            FLAGS_BITS = 6
 
-            self.bitmask = lo & ones(MASK_BITS)
-            lo >>= MASK_BITS
-            self._kind = lo & ones(KIND_BITS)
-            lo >>= KIND_BITS
+            self.bitmask = lo & ones(cdb2.LEAF_MASK_BITS)
+            lo >>= cdb2.LEAF_MASK_BITS
+            self._kind = lo & ones(cdb2.LEAF_KIND_BITS)
+            lo >>= cdb2.LEAF_KIND_BITS
             self._triangle_offset = lo  # 32-2-4-3 = 23 bit
             hi: int
             hi, = struct.unpack("<I", data[4:])
-            self._num_triangles = hi & ones(COUNT_BITS)
-            hi >>= COUNT_BITS
-            self._flags = hi & ones(FLAGS_BITS)
-            hi >>= FLAGS_BITS
+            self._num_triangles = hi & ones(cdb2.LEAF_TRIANGLE_COUNT_BITS)
+            hi >>= cdb2.LEAF_TRIANGLE_COUNT_BITS
+            self._flags = hi & ones(cdb2.LEAF_FLAGS_BITS)
+            hi >>= cdb2.LEAF_FLAGS_BITS
             self._vert_offset = hi  # 19 bit
             self.triangles: Optional[List[Triangle]] = None
         else:
-            # 24b child offset, 6b mask, 2b axis
-            MASK_BITS = 6
-            # 16b max, 16b min
 
             # I suspect that in practice, this is still <= 4 bit,
             # like for leafs, but the engine can also handle more
-            self.bitmask = lo & ones(MASK_BITS)
-            lo >>= MASK_BITS
+            self.bitmask = lo & ones(cdb2.INNER_NODE_MASK_BITS)
+            lo >>= cdb2.INNER_NODE_MASK_BITS
             child0_offset = lo
             assert child0_offset % cdb2.NODE_SIZE == 0,\
                 f'unexpected node offset {child0_offset} is not a multiple of {cdb2.NODE_SIZE}'
@@ -459,8 +449,6 @@ class VertexMapping:
         assert idx < len(self.vertex_coords), \
             f"vertex index {idx} out of range, there are {len(self.vertex_coords)} vertices totalling {self.header.len_vertices} bytes"
         mapping = len(self.mapped_verts)
-        # TODO simplify the vertex handling
-        # it's confusing that we treat vertices as individual scalars up to here
         self.mapped_verts.append(
             y_up_to_z_up(
                 scale_to_blender(
