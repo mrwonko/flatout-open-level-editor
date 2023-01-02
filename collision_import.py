@@ -5,41 +5,13 @@ import mathutils
 import os
 import struct
 from typing import Dict, List, NewType, Optional, Set, Tuple, TypeVar, Union
-
-FILE_ID = b'!vq\x98'
-VERSION = 0
-HEADER_SIZE = 64
-NODE_SIZE = 8
-TEST_BITMASK = True
-VERIFY_REACHABILITY = True
-CHECK_BOUNDS = True
-COLOR_SHALLOW = mathutils.Color((0xD0/0xFF, 0x00/0xFF, 0x70/0xFF))
-COLOR_DEEP = mathutils.Color((0x00/0xFF, 0x32/0xFF, 0xA0/0xFF))
-
-# The keys here match the (1-based) indices in global/dynamics/surfaces.bed
-COLOR_TARMAC = mathutils.Color((.2, .2, .2))
-SURFACE_COLORS: Dict[int, mathutils.Color] = {
-    # NoCollision
-    1: mathutils.Color((1, 0, 1)),
-    # Tarmac (Road)
-    2: COLOR_TARMAC,
-    # Tarmac Mark (Road) - identical physics as 2 -> same color
-    3: COLOR_TARMAC,
-    # Asphalt (Road) - identical physics as 2 -> same color
-    4: COLOR_TARMAC,
-    # Asphalt Mark (Road) - identical physics as 2 -> same color
-    5: COLOR_TARMAC,
-    # Cement Mark (Road) - identical physics as 2 -> same color
-    6: COLOR_TARMAC,
-    # Cement Mark (Road) - identical physics as 2 -> same color
-    7: COLOR_TARMAC,
-    # TODO: more colors
-}
+from . import cdb2, config
+from .bitmath import ones
 
 
 @dataclass
 class Header:
-    # magic FILE_ID bytes
+    # magic cdb2.FILE_ID bytes
     file_id: bytes
     version: int
     # bounding box around the level, scaled by axis_multipliers
@@ -97,16 +69,16 @@ class Header:
             relative_ofs_vertices=struct.unpack("<I", f.read(4))[0],
             file_size=file_size,
         )
-        assert f.tell() == HEADER_SIZE, \
-            f"should have consumed {HEADER_SIZE} bytes after header, not {f.tell()}"
-        if res.file_id != FILE_ID:
+        assert f.tell() == cdb2.HEADER_SIZE, \
+            f"should have consumed {cdb2.HEADER_SIZE} bytes after header, not {f.tell()}"
+        if res.file_id != cdb2.FILE_ID:
             raise ValueError(
-                f'bad magic header, want {FILE_ID}, got {res.file_id}')
-        if res.version != VERSION:
+                f'bad magic header, want {cdb2.FILE_ID}, got {res.file_id}')
+        if res.version != cdb2.VERSION:
             # note that I'm not 100% certain this is a version number,
             # but it's always 0 in my experience.
             raise ValueError(
-                f'bad file version, want {VERSION}, got {res.version}')
+                f'bad file version, want {cdb2.VERSION}, got {res.version}')
         # if this ever happens, len_triangles and len_vertices need to be adjusted.
         assert res.relative_ofs_triangles <= res.relative_ofs_vertices, \
             "this importer assumes the triangle data comes before the vertex data and needs to be adjusted to support this file"
@@ -115,17 +87,17 @@ class Header:
     @property
     def ofs_tree(self) -> int:
         """Offset in the reader where the AABB tree data starts"""
-        return HEADER_SIZE
+        return cdb2.HEADER_SIZE
 
     @property
     def ofs_triangles(self) -> int:
         """Offset in the reader where the packed triangle data starts."""
-        return self.relative_ofs_triangles + HEADER_SIZE
+        return self.relative_ofs_triangles + cdb2.HEADER_SIZE
 
     @property
     def ofs_vertices(self) -> int:
         """Offset in the reader where the vertex coordinate data starts."""
-        return self.relative_ofs_vertices + HEADER_SIZE
+        return self.relative_ofs_vertices + cdb2.HEADER_SIZE
 
     @property
     def len_tree(self) -> int:
@@ -185,15 +157,10 @@ class AABB:
         return AABB(self.min.copy(), self.max.copy())
 
 
-def ones(n: int) -> int:
-    """Returns a bitmask where the lowest n bits are 1."""
-    return (1 << n)-1
-
-
 class Node:
     def __init__(self, data: bytes, index: int, header: Header) -> None:
-        assert len(data) == NODE_SIZE, \
-            f'expected {NODE_SIZE} bytes, not {len(data)}'
+        assert len(data) == cdb2.NODE_SIZE, \
+            f'expected {cdb2.NODE_SIZE} bytes, not {len(data)}'
         AXIS_BITS = 2
         # I'm not entirely sure if the nomenclature is correct here,
         # but I'm calling the first dword lo(w) and the second one hi(gh)
@@ -235,16 +202,16 @@ class Node:
             self.bitmask = lo & ones(MASK_BITS)
             lo >>= MASK_BITS
             child0_offset = lo
-            assert child0_offset % NODE_SIZE == 0,\
-                f'unexpected node offset {child0_offset} is not a multiple of {NODE_SIZE}'
-            self._child0_index = child0_offset // NODE_SIZE
+            assert child0_offset % cdb2.NODE_SIZE == 0,\
+                f'unexpected node offset {child0_offset} is not a multiple of {cdb2.NODE_SIZE}'
+            self._child0_index = child0_offset // cdb2.NODE_SIZE
             self._max: int
             self._min: int
             self._max, self._min = struct.unpack("<2h", data[4:])
-            assert (self.children[0] + 1) * NODE_SIZE <= header.len_tree, \
-                f"leaf {index} first child {self.children[0]} out of range {header.len_tree//NODE_SIZE}"
-            assert (self.children[1] + 1) * NODE_SIZE <= header.len_tree, \
-                f"leaf {index} second child {self.children[1]} out of range {header.len_tree//NODE_SIZE}"
+            assert (self.children[0] + 1) * cdb2.NODE_SIZE <= header.len_tree, \
+                f"leaf {index} first child {self.children[0]} out of range {header.len_tree//cdb2.NODE_SIZE}"
+            assert (self.children[1] + 1) * cdb2.NODE_SIZE <= header.len_tree, \
+                f"leaf {index} second child {self.children[1]} out of range {header.len_tree//cdb2.NODE_SIZE}"
 
     @property
     def is_leaf(self) -> bool:
@@ -447,7 +414,8 @@ def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[N
             obj.color = color[:]+(1.0,)
             collection.objects.link(obj)
             return obj
-        color = color_lerp(depth/max_depth, COLOR_SHALLOW, COLOR_DEEP)
+        color = color_lerp(
+            depth/max_depth, config.COLOR_SHALLOW, config.COLOR_DEEP)
         obj_inside = visualise_bounds(
             name=f"node{node_index}_inside",
             aabb=inside_bounds,
@@ -550,7 +518,7 @@ class MaterialManager:
         # if available, assign a color
         # TODO: customisable colors?
         try:
-            mat.diffuse_color = SURFACE_COLORS[surface][:]+(1.0,)
+            mat.diffuse_color = config.SURFACE_COLORS[surface][:]+(1.0,)
         except KeyError:
             pass
         # TODO: visualise the flags in the material somehow?
@@ -635,8 +603,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
         # Count how often each kind of leaf encoding is used.
         # This was primarily used to decide which one to implement first.
         kind_counts: Dict[int, int] = {}
-        while f.tell() + NODE_SIZE <= header.ofs_triangles:
-            node = Node(f.read(NODE_SIZE), len(nodes), header)
+        while f.tell() + cdb2.NODE_SIZE <= header.ofs_triangles:
+            node = Node(f.read(cdb2.NODE_SIZE), len(nodes), header)
             # collect some debugging stats
             if node.is_leaf:
                 kind_counts[node.leaf_kind] = kind_counts.get(
@@ -644,10 +612,10 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             seen_bitmask |= node.bitmask
             nodes.append(node)
 
-        if TEST_BITMASK:
+        if config.TEST_BITMASK:
             test_bitmask(nodes)
 
-        if VERIFY_REACHABILITY:
+        if config.VERIFY_REACHABILITY:
             verify_reachability(nodes)
 
         collision_collection = bpy.data.collections.get('collision')
@@ -682,7 +650,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
             for i in range(0, header.len_vertices, 2)
         ]
 
-        if CHECK_BOUNDS:
+        if config.CHECK_BOUNDS:
             check_bounds(
                 nodes=nodes,
                 len_triangle_data=len(triangle_data),
@@ -962,18 +930,15 @@ class ImportOperator(bpy.types.Operator):
         name="Debug Visualization", description="Imports the collision tree. The tree is automatically rebuilt on export, this is only for debugging.", default=False)
 
     def execute(self, context):
-        self.ImportStart()
+        import_file(self.properties.filepath,
+                    enable_debug_visualization=self.properties.enable_debug_visualization)
+        # self.report( { 'ERROR' }, f'import of {self.properties.filepath} not yet implemented')
         return {'FINISHED'}
 
     def invoke(self, context, event):
         # sets self.properties.filename and runs self.execute()
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
-
-    def ImportStart(self):
-        import_file(self.properties.filepath,
-                    enable_debug_visualization=self.properties.enable_debug_visualization)
-        # self.report( { 'ERROR' }, f'import of {self.properties.filepath} not yet implemented')
 
 
 def import_menu_func(self, context):
