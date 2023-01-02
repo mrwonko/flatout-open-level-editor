@@ -321,7 +321,7 @@ def verify_reachability(nodes: List[Node]) -> None:
         check_reachability(root.children[1])
     check_reachability(0)
     unreachable = [i for i, r in enumerate(reachable) if not r]
-    assert len(unreachable) == 0, 'found {len(unreachable)} orphan node(s), first ten: {unreachable[:10]}'
+    assert len(unreachable) == 0, f'found {len(unreachable)} orphan node(s), first ten: {unreachable[:10]}'
 
 def check_bounds(nodes: List[Node], len_triangle_data: int, len_vertex_coords: int):
     """
