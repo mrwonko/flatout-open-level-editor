@@ -1,13 +1,17 @@
+from .mod_reload import reload_modules
+reload_modules(locals(), __package__, ["cdb2", "config"], [".geometry", ".bitmath", ".collision_mesh"])  # nopep8
+
 import bpy
 import io
 from dataclasses import dataclass
 import mathutils
 import os
 import struct
-from typing import Dict, List, NewType, Optional, Set, Tuple, TypeVar, Union
+from typing import Dict, List, Optional, Set, Tuple, TypeVar, Union
 from . import cdb2, config
+from .geometry import AABB
 from .bitmath import ones
-from .aabb import AABB
+from .collision_mesh import PackedMaterial, Triangle
 
 
 @dataclass
@@ -146,9 +150,6 @@ def scale_to_blender(vert: Union[Tuple[int, int, int], List[int]], multipliers: 
     return [e*m for e, m in zip(vert, multipliers)]
 
 
-PackedMaterial = NewType("PackedMaterial", int)
-
-
 class Node:
     def __init__(self, data: bytes, index: int, header: Header) -> None:
         assert len(data) == cdb2.NODE_SIZE, \
@@ -261,16 +262,10 @@ class Node:
         return self._min
 
 
-@dataclass
-class Triangle:
-    # the low 6 bit are the node flags, the rest are triangle-specific
-    flags: PackedMaterial
-    vert_indices: Tuple[int, int, int]
-
-    def check_bounds(self, node: Node, node_index: int, len_vert_coords: int) -> None:
-        for axis, idx in enumerate(self.vert_indices):
-            assert idx + 2 < len_vert_coords, \
-                f"node {node_index} (kind {node.leaf_kind}) axis {axis} vertex index {idx} out of range (max {len_vert_coords-2})"
+def check_triangle_bounds(tri: Triangle, node: Node, node_index: int, len_vert_coords: int) -> None:
+    for axis, idx in enumerate(tri.vert_indices):
+        assert idx + 2 < len_vert_coords, \
+            f"node {node_index} (kind {node.leaf_kind}) axis {axis} vertex index {idx} out of range (max {len_vert_coords-2})"
 
 
 def test_bitmask(nodes: List[Node]) -> None:
@@ -686,7 +681,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                     get(3) >> 3 | get(4) << 5 | get(5) << 5+8
                 ),
             ))
-            triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+            check_triangle_bounds(
+                triangles[-1], node, node_index, len(vertex_coords))
             iter += 6
             # 0th triangle (above) is unconditional, start loop at 1st
             for i in range(1, node.num_triangles):
@@ -704,8 +700,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         get(6) >> 5 | get(7) << 3 | get(8) << 3+8,
                     ),
                 ))
-                triangles[-1].check_bounds(node,
-                                           node_index, len(vertex_coords))
+                check_triangle_bounds(triangles[-1], node,
+                                      node_index, len(vertex_coords))
                 iter += 9
         elif node.leaf_kind == 1:
             triangles.append(Triangle(
@@ -721,7 +717,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                     get(3) >> 3 | get(4) << 5 | get(5) << 5+8
                 ),
             ))
-            triangles[-1].check_bounds(node, node_index, len(vertex_coords))
+            check_triangle_bounds(
+                triangles[-1], node, node_index, len(vertex_coords))
             iter += 6
             for i in range(1, node.num_triangles):
                 triangles.append(Triangle(
@@ -738,8 +735,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         get(5) >> 5 | get(6) << 3 | get(7) << 3+8,
                     ),
                 ))
-                triangles[-1].check_bounds(node,
-                                           node_index, len(vertex_coords))
+                check_triangle_bounds(
+                    triangles[-1], node,  node_index, len(vertex_coords))
                 iter += 8
         elif node.leaf_kind == 2:
             for i in range(node.num_triangles):
@@ -758,10 +755,10 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         vert_offset + get(4),
                     ),
                 ))
-                triangles[-1].check_bounds(
-                    node,
-                    node_index,
-                    len(vertex_coords))
+                check_triangle_bounds(triangles[-1],
+                                      node,
+                                      node_index,
+                                      len(vertex_coords))
                 iter += 5
         elif node.leaf_kind == 3:
             for i in range(node.num_triangles):
@@ -778,8 +775,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         vert_offset + get(3),
                     ),
                 ))
-                triangles[-1].check_bounds(node,
-                                           node_index, len(vertex_coords))
+                check_triangle_bounds(triangles[-1], node,
+                                      node_index, len(vertex_coords))
                 iter += 4
         elif node.leaf_kind == 4:
             for i in range(node.num_triangles):
@@ -797,8 +794,8 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         vert_offset + (get(3) >> 5 | get(4) << 3),
                     ),
                 ))
-                triangles[-1].check_bounds(node,
-                                           node_index, len(vertex_coords))
+                check_triangle_bounds(triangles[-1], node,
+                                      node_index, len(vertex_coords))
                 iter += 5
         elif node.leaf_kind == 5:
             for i in range(node.num_triangles):
@@ -815,10 +812,10 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
                         vert_offset + (get(2) >> 2),
                     ),
                 ))
-                triangles[-1].check_bounds(
-                    node,
-                    node_index,
-                    len(vertex_coords))
+                check_triangle_bounds(triangles[-1],
+                                      node,
+                                      node_index,
+                                      len(vertex_coords))
                 iter += 3
         else:
             raise ValueError(

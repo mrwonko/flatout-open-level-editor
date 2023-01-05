@@ -1,3 +1,6 @@
+from .mod_reload import reload_modules
+reload_modules(locals(), __package__, [], [".bitmath"])  # nopep8
+
 import mathutils
 from typing import Dict
 from .bitmath import ones
@@ -10,6 +13,8 @@ def hex_color(hexcode: int) -> mathutils.Color:
         (hexcode & ones(8)) / ones(8)
     ))
 
+
+# import
 
 TEST_BITMASK = True
 VERIFY_REACHABILITY = True
@@ -36,3 +41,9 @@ SURFACE_COLORS: Dict[int, mathutils.Color] = {
     7: COLOR_TARMAC,
     # TODO: more colors
 }
+
+# export
+
+# Since we apply a uniform scale to each axis, the result is more precise if the map is centered.
+# If we use less than this much of the available coordinate space, warn.
+COORDINATE_UTILIZATION_WARN_THRESHOLD = 0.75

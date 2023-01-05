@@ -19,3 +19,6 @@ LEAF_FLAGS_BITS = 6
 # 24b child offset, 6b mask, 2b axis
 INNER_NODE_MASK_BITS = 6
 # 16b max, 16b min
+
+# coordinates are signed 16 bit integers
+COORDINATE_BITS = 16

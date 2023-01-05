@@ -1,3 +1,6 @@
+from .mod_reload import reload_modules
+reload_modules(locals(), __package__, ["collision_import", "collision_export"])  # nopep8
+
 from . import collision_import, collision_export
 
 bl_info = {
