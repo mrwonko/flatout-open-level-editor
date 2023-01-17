@@ -460,6 +460,36 @@ class VertexMapping:
         return mapping
 
 
+class MaterialProperties(bpy.types.PropertyGroup):
+    collision_surface: bpy.props.IntProperty(
+        name="Surface",
+        description="Reference into the Surfaces defined in global/dynamics/surfaces.bed",
+        # Like Lua, we use 1-based indices.
+        min=1,
+        # In the file, we convert to 0-based indices, but here the maximum is 64, not 63.
+        max=1 << 6,
+        default=1,
+    )
+    collision_flags: bpy.props.BoolVectorProperty(
+        name="Flags",
+        # TODO: determine and document meaning
+        description="Flags with unknown meaning. The first 6 seem to form a group, the final one defaults to 0 in some encodings.",
+        size=6+2,
+        # TODO: find good defaults
+        default=[False]*(6+2),
+        subtype="LAYER",
+    )
+
+
+def material_properties_draw_func(self: bpy.types.Panel, context: bpy.types.Context):
+    layout = self.layout
+    ob = context.object
+    box = layout.box()
+    box.label(text="FlatOut 2 Collision")
+    box.prop(ob.active_material.fo2, "collision_surface")
+    box.prop(ob.active_material.fo2, "collision_flags")
+
+
 class MaterialManager:
     """
     Keeps track of created materials so we only create one material per flag-combination.
@@ -498,36 +528,24 @@ class MaterialManager:
             pass
         # TODO: visualise the flags in the material somehow?
         # we use custom properties as defined below for FlatOut 2 specific data
-        mat.fo2_collision_surface = surface
-        mat.fo2_collision_flags = [flags & (1 << b) != 0 for b in range(8)]
+        mat.fo2.collision_surface = surface
+        mat.fo2.collision_flags = [flags & (1 << b) != 0 for b in range(8)]
         return mat
 
     @staticmethod
     def add_properties() -> None:
-        bpy.types.Material.fo2_collision_surface = bpy.props.IntProperty(
-            name="FO2 Collision Surface",
-            description="For FlatOut 2 track collision meshes: reference into the Surfaces defined in global/dynamics/surfaces.bed",
-            # Like Lua, we use 1-based indices.
-            min=1,
-            # In the file, we convert to 0-based indices, but here the maximum is 64, not 63.
-            max=1 << 6,
-            default=1,
-        )
-        bpy.types.Material.fo2_collision_flags = bpy.props.BoolVectorProperty(
-            name="FO2 Collision Flags",
-            description="For FlatOut 2 track collision meshes: flags with unknown meaning. The first 6 seem to form a group, the final one defaults to 0 in some encodings.",
-            size=6+2,
-            # TODO: find good defaults
-            default=[False]*(6+2),
-            subtype="LAYER",
-        )
+        bpy.utils.register_class(MaterialProperties)
+        bpy.types.Material.fo2 = bpy.props.PointerProperty(
+            type=MaterialProperties)
+        bpy.types.MATERIAL_PT_custom_props.prepend(
+            material_properties_draw_func)
 
-    @staticmethod
+    @ staticmethod
     def remove_properties() -> None:
-        bpy.props.RemoveProperty(
-            bpy.types.Material, attr="fo2_collision_flags")
-        bpy.props.RemoveProperty(
-            bpy.types.Material, attr="fo2_collision_surface")
+        bpy.types.MATERIAL_PT_custom_props.remove(
+            material_properties_draw_func)
+        bpy.props.RemoveProperty(bpy.types.Material, attr="fo2")
+        bpy.utils.unregister_class(MaterialProperties)
 
 
 class MeshMaterialManager:
