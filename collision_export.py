@@ -1,7 +1,7 @@
 from .mod_reload import reload_modules
 reload_modules(locals(), __package__, ["cdb2", "config"], [".geometry"])  # nopep8
 
-from typing import Callable, Iterable, List, Optional, Set, Union, cast
+from typing import Callable, Dict, Iterable, List, NewType, Optional, Set, Tuple, Union, cast
 from .geometry import AABB, vector_abs, vector_max, vector_min
 from . import cdb2, config
 from mathutils import Vector
@@ -94,6 +94,48 @@ def calculate_axis_multipliers(report: report_func, collision_meshes: Iterable[b
     return Vector([MAX_ABS_COORDINATE/e for e in max_abs_bounds])
 
 
+vec3_scaled = NewType("vec3_scaled", Tuple[int, int, int])
+
+
+class VertexEncoder:
+    """
+    Scales vertex coordinates into the 16 bit range using the axis multipliers.
+    """
+
+    def __init__(self, axis_multipliers: Vector) -> None:
+        self._axis_multipliers = axis_multipliers
+        self._mapping: Dict[vec3_scaled, int] = {}
+        self._vertices: List[vec3_scaled] = []
+
+    def upsert(self, world_vert: Vector) -> int:
+        scaled_vert = self._scale_vert(world_vert)
+        try:
+            return self._mapping[scaled_vert]
+        except KeyError:
+            idx = len(self._vertices)
+            self._vertices.append(scaled_vert)
+            self._mapping[scaled_vert] = idx
+            return idx
+
+    @property
+    def vertices(self) -> List[vec3_scaled]:
+        return self._vertices
+
+    def _scale_vert(self, vert: Vector) -> vec3_scaled:
+        res = vec3_scaled(
+            tuple(round(self._axis_multipliers[i]*vert[i]) for i in range(3)))
+        # sanity check: ensure we're within the valid range
+        assert all(c >= -MAX_ABS_COORDINATE and c <= MAX_ABS_COORDINATE for c in res), \
+            f"scaling {vert=} by multiplier={self._axis_multipliers} resulted in {res}, which exceeds [{-MAX_ABS_COORDINATE}, {MAX_ABS_COORDINATE}]"
+        return res
+
+
+def triangle_area(a: Vector, b: Vector, c: Vector) -> float:
+    e1 = b - a
+    e2 = c - a
+    return e1.cross(e2).length / 2
+
+
 def export_file(report: report_func, path: str) -> None:
     print(f"export to \"{path}\"")
 
@@ -103,6 +145,23 @@ def export_file(report: report_func, path: str) -> None:
     axis_multipliers = calculate_axis_multipliers(
         report=report,
         collision_meshes=collision_meshes)
+
+    # Scale/compress vertices
+    if True:
+        # TODO loop instead of [0]
+        obj = collision_meshes[0]
+        mesh = cast(bpy.types.Mesh, obj.data)
+        tri = mesh.loop_triangles[0]
+        poly_idx = tri.polygon_index
+        mat: bpy.types.Material = mesh.materials[tri.material_index]
+        vert_idx = tri.vertices[0]
+        vert = mesh.vertices[vert_idx]
+        world_vert: Vector = obj.matrix_world @ vert.co
+        surface = mat.fo2.collision_surface
+        flags = mat.fo2.collision_flags[:]
+        print(f"{surface=} {flags=}")
+        # TODO scale using VertexEncoder
+        # TODO use triangle_area to detect and filter out and warn about degenerate triangles
     print(f"{axis_multipliers=}")
 
 
