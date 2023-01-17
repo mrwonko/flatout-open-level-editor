@@ -50,7 +50,10 @@ report_func = Callable[[Union[Set[int], Set[str]], str], None]
 
 def check_coordinate_space_utilization(report: report_func, bounds: AABB) -> Vector:
     """
-
+    Reports a warning if the bounds are too far off-center.
+    Since coordinates get mapped into an int32 range with a single factor per axis,
+    if the model extends further in one direction, coordinate space is wasted.
+    Returns the maximum absolute bounds, from which the scaling factor derives.
     """
     max_abs_bounds = vector_max(vector_abs(bounds.min), vector_abs(bounds.max))
     abs_center = vector_abs((bounds.min + bounds.max) / 2)
