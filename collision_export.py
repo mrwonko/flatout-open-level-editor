@@ -91,7 +91,7 @@ def calculate_axis_multipliers(report: report_func, collision_meshes: Iterable[b
     max_abs_bounds = check_coordinate_space_utilization(
         report=report,
         bounds=bounds)
-    return Vector([e/MAX_ABS_COORDINATE for e in max_abs_bounds])
+    return Vector([MAX_ABS_COORDINATE/e for e in max_abs_bounds])
 
 
 def export_file(report: report_func, path: str) -> None:
