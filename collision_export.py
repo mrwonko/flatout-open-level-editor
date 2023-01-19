@@ -1,6 +1,9 @@
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["cdb2", "config"], [".geometry"])  # nopep8
+reload_modules(locals(), __package__, ["cdb2", "config"], [".bitmath", ".collision_mesh", ".geometry"])  # nopep8
 
+from .bitmath import ones
+from .collision_mesh import PackedMaterial, Triangle
+from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, NewType, Optional, Set, Tuple, Union, cast
 from .geometry import AABB, vector_abs, vector_max, vector_min
 from . import cdb2, config
@@ -136,6 +139,72 @@ def triangle_area(a: Vector, b: Vector, c: Vector) -> float:
     return e1.cross(e2).length / 2
 
 
+class TriangleEncoder:
+    def __init__(self, vertex_encoder: VertexEncoder) -> None:
+        self._vertex_encoder = vertex_encoder
+        self._tris: List[Triangle] = []
+
+    def append(self, verts: Tuple[Vector, Vector, Vector], flags: PackedMaterial) -> bool:
+        """
+        Encodes a triangle into the fixed-point coordinate system used by the file.
+        Returns whether the triangle was valid.
+        Degenerate triangles (i.e. with collinear vertices) are invalid and get dropped.
+        This can happen due to the rounding involved in quantizing the coordinates.
+        """
+        vert_indices: Tuple[int, int, int] = tuple(
+            self._vertex_encoder.upsert(v) for v in verts)
+        degenerate = triangle_area(
+            *(Vector(self._vertex_encoder.vertices[idx]) for idx in vert_indices)) == 0
+        if degenerate:
+            # It's somewhat unfortunate that in this case, the vertices still get upserted.
+            # Ideally, those insertions should be rolled back, or we may save unused vertices.
+            # But that should be relative harmless, and the situation should be avoided anyway.
+            return False
+        self._tris.append(Triangle(flags=flags, vert_indices=vert_indices))
+        return True
+
+    @property
+    def triangles(self) -> List[Triangle]:
+        return self._tris
+
+
+@dataclass
+class DegenerateTriangle:
+    object: bpy.types.Object
+    polygon_index: int
+
+
+def encode_flags(surface: int, flags: Iterable[bool]) -> PackedMaterial:
+    packed_flags = 0
+    for i, f in enumerate(flags):
+        if f:
+            packed_flags |= 1 << i
+    loflags = packed_flags & ones(6)
+    hiflags = (packed_flags >> 6)
+    return PackedMaterial((surface - 1) | (loflags << 8) | (hiflags << 8+8))
+
+
+def encode_triangles(axis_multipliers: Vector, collision_meshes: Iterable[bpy.types.Object]) -> Tuple[List[vec3_scaled], List[Triangle], List[DegenerateTriangle]]:
+    vertex_encoder = VertexEncoder(axis_multipliers=axis_multipliers)
+    triangle_encoder = TriangleEncoder(vertex_encoder=vertex_encoder)
+    degenerates: List[DegenerateTriangle] = []
+    for obj in collision_meshes:
+        mesh = cast(bpy.types.Mesh, obj.data)
+        for tri in mesh.loop_triangles:
+            mat: bpy.types.Material = mesh.materials[tri.material_index]
+            # convert back from 1-based surfaces.bed index to 0-based
+            ok = triangle_encoder.append(
+                verts=(obj.matrix_world @
+                       mesh.vertices[idx].co for idx in tri.vertices),
+                flags=encode_flags(
+                    surface=mat.fo2.collision_surface, flags=mat.fo2.collision_flags),
+            )
+            if not ok:
+                degenerates.append(DegenerateTriangle(
+                    object=obj, polygon_index=tri.polygon_index))
+    return vertex_encoder.vertices, triangle_encoder.triangles, degenerates
+
+
 def export_file(report: report_func, path: str) -> None:
     print(f"export to \"{path}\"")
 
@@ -145,24 +214,19 @@ def export_file(report: report_func, path: str) -> None:
     axis_multipliers = calculate_axis_multipliers(
         report=report,
         collision_meshes=collision_meshes)
-
-    # Scale/compress vertices
-    if True:
-        # TODO loop instead of [0]
-        obj = collision_meshes[0]
-        mesh = cast(bpy.types.Mesh, obj.data)
-        tri = mesh.loop_triangles[0]
-        poly_idx = tri.polygon_index
-        mat: bpy.types.Material = mesh.materials[tri.material_index]
-        vert_idx = tri.vertices[0]
-        vert = mesh.vertices[vert_idx]
-        world_vert: Vector = obj.matrix_world @ vert.co
-        surface = mat.fo2.collision_surface
-        flags = mat.fo2.collision_flags[:]
-        print(f"{surface=} {flags=}")
-        # TODO scale using VertexEncoder
-        # TODO use triangle_area to detect and filter out and warn about degenerate triangles
     print(f"{axis_multipliers=}")
+
+    verts, tris, degenerates = encode_triangles(
+        axis_multipliers=axis_multipliers,
+        collision_meshes=collision_meshes,
+    )
+    if (num_degenerates := len(degenerates)) > 0:
+        # TODO: provide an operator for identifying degenerate triangles
+        report(
+            {'WARNING'},
+            f"{num_degenerates} triangle{'s' if num_degenerates > 0 else ''} ignored due to being too small to represent"
+        )
+    print(f"encoded {len(tris)} triangles using {len(verts)} vertices")
 
 
 class ExportOperator(bpy.types.Operator):
