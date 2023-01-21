@@ -227,6 +227,19 @@ def export_file(report: report_func, path: str) -> None:
             f"{num_degenerates} triangle{'s' if num_degenerates > 0 else ''} ignored due to being too small to represent"
         )
     print(f"encoded {len(tris)} triangles using {len(verts)} vertices")
+    # ideas/thoughts on/sketch for building the r-tree
+    #
+    # along each axis:
+    #  sort tris once each by mins and maxs
+    # efficiently query:
+    #  how many mins/maxs are on either side of a given value on an axis,
+    #  or rather: bisect where for most even split into partitions?
+    #  then choose axis with smallest overlap? Is that a good heuristic?
+    #  keep descending until when?
+    #  at least until leafs are small enough (127 tris?)
+    #  and then still while partition overlap is low
+    # efficiently update:
+    #  partition sorted lists into two new lists for child nodes, with overlap (!?!), retaining order
 
 
 class ExportOperator(bpy.types.Operator):
