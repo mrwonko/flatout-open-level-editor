@@ -47,3 +47,7 @@ SURFACE_COLORS: Dict[int, mathutils.Color] = {
 # Since we apply a uniform scale to each axis, the result is more precise if the map is centered.
 # If we use less than this much of the available coordinate space, warn.
 COORDINATE_UTILIZATION_WARN_THRESHOLD = 0.75
+
+# if the number of triangles in a node drops to or below this threshold, it must become a leaf
+# (it may already become a leaf earlier due to other heuristics)
+FORCE_LEAF_THRESHOLD = 1  # TODO: how high can we have this?

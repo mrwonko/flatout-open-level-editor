@@ -1,12 +1,12 @@
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["cdb2", "config"], [".bitmath", ".collision_mesh", ".geometry"])  # nopep8
+reload_modules(locals(), __package__, ["cdb2", "config", "collision_mesh"], [".bitmath", ".geometry", ".list"])  # nopep8
 
 from .bitmath import ones
-from .collision_mesh import PackedMaterial, Triangle
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, NewType, Optional, Set, Tuple, Union, cast
-from .geometry import AABB, vector_abs, vector_max, vector_min
-from . import cdb2, config
+from typing import Callable, Dict, Generator, Iterable, List, NewType, Optional, Set, Tuple, Union, cast
+from .geometry import AABB, Axis, BoundKind, vector_abs, vector_max, vector_min
+from .list import LinkedList
+from . import cdb2, collision_mesh, config
 from mathutils import Vector
 import bpy
 
@@ -139,12 +139,18 @@ def triangle_area(a: Vector, b: Vector, c: Vector) -> float:
     return e1.cross(e2).length / 2
 
 
+@dataclass
+class Triangle:
+    collision: collision_mesh.Triangle
+    aabb: AABB
+
+
 class TriangleEncoder:
     def __init__(self, vertex_encoder: VertexEncoder) -> None:
         self._vertex_encoder = vertex_encoder
         self._tris: List[Triangle] = []
 
-    def append(self, verts: Tuple[Vector, Vector, Vector], flags: PackedMaterial) -> bool:
+    def append(self, verts: Tuple[Vector, Vector, Vector], flags: collision_mesh.PackedMaterial) -> bool:
         """
         Encodes a triangle into the fixed-point coordinate system used by the file.
         Returns whether the triangle was valid.
@@ -160,7 +166,8 @@ class TriangleEncoder:
             # Ideally, those insertions should be rolled back, or we may save unused vertices.
             # But that should be relative harmless, and the situation should be avoided anyway.
             return False
-        self._tris.append(Triangle(flags=flags, vert_indices=vert_indices))
+        self._tris.append(Triangle(collision=collision_mesh.Triangle(
+            flags=flags, vert_indices=vert_indices), aabb=AABB.around(verts)))
         return True
 
     @property
@@ -174,14 +181,14 @@ class DegenerateTriangle:
     polygon_index: int
 
 
-def encode_flags(surface: int, flags: Iterable[bool]) -> PackedMaterial:
+def encode_flags(surface: int, flags: Iterable[bool]) -> collision_mesh.PackedMaterial:
     packed_flags = 0
     for i, f in enumerate(flags):
         if f:
             packed_flags |= 1 << i
     loflags = packed_flags & ones(6)
     hiflags = (packed_flags >> 6)
-    return PackedMaterial((surface - 1) | (loflags << 8) | (hiflags << 8+8))
+    return collision_mesh.PackedMaterial((surface - 1) | (loflags << 8) | (hiflags << 8+8))
 
 
 def encode_triangles(axis_multipliers: Vector, collision_meshes: Iterable[bpy.types.Object]) -> Tuple[List[vec3_scaled], List[Triangle], List[DegenerateTriangle]]:
@@ -192,10 +199,11 @@ def encode_triangles(axis_multipliers: Vector, collision_meshes: Iterable[bpy.ty
         mesh = cast(bpy.types.Mesh, obj.data)
         for tri in mesh.loop_triangles:
             mat: bpy.types.Material = mesh.materials[tri.material_index]
+            assert len(tri.vertices) == 3
             # convert back from 1-based surfaces.bed index to 0-based
             ok = triangle_encoder.append(
-                verts=(obj.matrix_world @
-                       mesh.vertices[idx].co for idx in tri.vertices),
+                verts=tuple(obj.matrix_world @
+                            mesh.vertices[idx].co for idx in tri.vertices),
                 flags=encode_flags(
                     surface=mat.fo2.collision_surface, flags=mat.fo2.collision_flags),
             )
@@ -203,6 +211,224 @@ def encode_triangles(axis_multipliers: Vector, collision_meshes: Iterable[bpy.ty
                 degenerates.append(DegenerateTriangle(
                     object=obj, polygon_index=tri.polygon_index))
     return vertex_encoder.vertices, triangle_encoder.triangles, degenerates
+
+
+"""
+ideas/thoughts on/sketch for building the r-tree
+    along each axis:
+    sort tris once each by mins and maxs
+    or maybe just by their center
+efficiently query:
+    how many mins/maxs are on either side of a given value on an axis,
+    or rather: bisect where for most even split into partitions?
+    then choose axis with smallest overlap? Is that a good heuristic?
+    keep descending until when?
+    at least until leafs are small enough (127 tris?)
+    and then still while partition overlap is low
+efficiently update:
+    partition sorted lists into two new lists for child nodes, with overlap (!?!), retaining order
+    along each axis
+    sort for efficient hitbox check (huh, that's what I need anyway)
+    probably once by lower and once by upper bound along each axis,
+    with the ability to derive new partitions
+    do a binary search for the ideal point to partition
+    TODO: what does that entail?
+    things to consider:
+    number of elements left, right and overlapping
+    reduction of search space of either child
+    weigh such that 10%-10% is better than 50%-50% is better than 10%-90%
+    score using the smaller reduction (e.g. when splitting into 70%/40%, the score is 70%) and look for greatest such reduction,
+    breaking ties based on the other reduction
+    partition into left, right and overlap
+    determine bounds (based on parent bounds and overlap bounds?)
+    how to efficiently do the partitioning, while allowing overlap?
+I'll have to duplicate the overlap,
+so a linked list would get copied lots and seems unsuitable.
+but a (balanced?) tree might do?
+But how do I partition efficiently?
+I want to iterate through one axis and update the others, so do I want intrusive containers?
+How would an intrusive container look, that can be split into two overlapping partitions through random (iterator) access?
+I have some vague ideas, but they are complicated. Too complicated?
+But _does_ it get simpler without intrusive containers?
+The absolute order remains fixed. Can I just store the absolute index along each axis? But once I start partitioning, those become less useful?
+    Actually, I got the overlap wrong.
+It's always a perfect bisection, each tri goes in exactly one of the children.
+But there are triangles which could potentially go into either one, I think?
+So for these, one of them must be chosen (optimisation opportunity! but find a cheap heuristic).
+So I partition a sorted sequence into two sorted sub-sequences.
+Once for each axis.
+To avoid allocations for the partition, I could fill a buffer from both ends.
+But I then have to recursively do that for a sub-range of it, at which point double-buffering breaks down.
+Do I want trees?
+    Instead of trying to break down the set of all triangles,
+I could also try to insertion sort it?
+But it feels like those insertions will be prohibitively complex?
+    I had the thought of doing a sweep down an axis,
+but while one bound could be adjusted iteratively,
+the other one would have to be re-calculated from all remaining elements each step?!?
+But: can this ever be avoided?
+        Inspired by Guttman:
+    seed partitions with the extreme bounds (i.e. tris spanning the maximum bounds)
+while unpartitioned triangles remain:
+    find the triangle where the choice of partition matters the most (i.e. range grows most)
+    assign it to the more suitable partition
+    then I can do that on each axis and pick the one that reduces the search space the most.
+        another sketch
+    def
+"""
+
+
+class SortedTriangles:
+    def __init__(self, by_axis_and_bound: Tuple[
+        Tuple[LinkedList[Triangle], LinkedList[Triangle]],
+        Tuple[LinkedList[Triangle], LinkedList[Triangle]],
+        Tuple[LinkedList[Triangle], LinkedList[Triangle]],
+    ]) -> None:
+        """
+        The same triangles sorted by their bounds along each axis.
+
+        Each node in the tree sweeps along one axis from one direction and puts everything up to a point into one child.
+        This partition retains the relative order of triangles, so we only need to sort them once.
+        Then we can recursively partition the lists of triangles until they're small enough for a leaf.
+        """
+        l: Optional[int] = None
+        for by_bound in by_axis_and_bound:
+            for tris in by_bound:
+                if l == None:
+                    l = len(tris)
+                else:
+                    assert l == len(tris), ""
+        self.__by_axis_and_bound = by_axis_and_bound
+
+    def by_axis_and_bound(self, axis: Axis, bound_kind: BoundKind) -> LinkedList[Triangle]:
+        return self.__by_axis_and_bound[axis.value][bound_kind.value]
+
+    def extract(self, axis: Axis, bound_kind: BoundKind, pivot: int) -> "SortedTriangles":
+        old_len = len(self)
+        contains = bound_kind.contains
+
+        def within_bound(tri: Triangle) -> bool:
+            return contains(pivot, tri.aabb.bound(axis, bound_kind))
+
+        extracted = SortedTriangles(
+            by_axis_and_bound=tuple(
+                tuple(tris.extract(within_bound) for tris in by_bound)
+                for by_bound in self.__by_axis_and_bound
+            ),
+        )
+        assert len(self) + len(extracted) == old_len
+        return extracted
+
+    def __len__(self) -> int:
+        # the lengths of all elements ought to be identical
+        return len(self.by_axis_and_bound(Axis.X, BoundKind.LOWER))
+
+    def __iter__(self) -> Generator[Tuple[Axis, BoundKind, LinkedList[Triangle]], None, None]:
+        for axis in Axis:
+            for bound_kind in BoundKind:
+                yield axis, bound_kind, self.by_axis_and_bound(axis, bound_kind)
+
+
+def build_tree(sorted_tris: SortedTriangles, aabb: AABB):
+    if len(sorted_tris) <= config.FORCE_LEAF_THRESHOLD:
+        # TODO build leaf
+        return
+
+    @dataclass
+    class PivotCandidate:
+        index: int
+        pivot: int
+        inverse_pivot: int
+        score: int
+
+    @dataclass
+    class Candidate:
+        axis: Axis
+        bound_kind: BoundKind
+        min_tri_length: int
+        pivot: PivotCandidate
+
+        @property
+        def score(self) -> float:
+            # within an axis, we can compare absolute total child length,
+            # but across axes we should compare relative child length
+            # TODO: take min_tri_length/aabb.length_on(self.axis) into account?
+            try:
+                # this should be within [-2, 0]
+                return self.pivot.score / aabb.length_on(self.axis)
+            except ZeroDivisionError:
+                # if this axis is already empty, it's as bad as two 100% children
+                return -2
+
+    best_candidate: Optional[Candidate] = None
+    for axis, bound_kind, tris in sorted_tris:
+        inverse_bound_kind = bound_kind.inverse
+        outer_bound = aabb.bound(axis, bound_kind)
+        inverse_outer_bound = aabb.bound(axis, bound_kind.inverse)
+
+        def score(pivot: int, inverse_pivot: int) -> int:
+            # We score by the combined size of the children,
+            # hopefully that will quickly reduce the physical search space,
+            # if not the number of elements...
+            # But we have to invert the result so smaller children score more.
+            return -(abs(outer_bound - inverse_pivot) + abs(inverse_outer_bound - pivot))
+
+        def evaluate(index: int, tri: Triangle, inverse_pivot: int) -> PivotCandidate:
+            # FIXME: this is off by one, compared to inverse_pivot
+            # (this makes the result less efficient, but not wrong)
+            pivot = tri.aabb.bound(axis, bound_kind)
+            return PivotCandidate(
+                index=index,
+                pivot=pivot,
+                inverse_pivot=inverse_pivot,
+                score=score(pivot, inverse_pivot)
+            )
+
+        tri_iter = iter(enumerate(tris))
+        # assume first element is best candidate until proven otherwise
+        i, tri = next(tri_iter)
+        inverse_pivot = tri.aabb.bound(axis, inverse_bound_kind)
+        best = evaluate(i, tri, inverse_pivot)
+        min_tri_length = tri.aabb.length_on(axis)
+        # search for better candidates
+        for i, tri in tri_iter:
+            if i + 1 == len(tris):
+                # avoid 0-length remainder
+                # TODO: move this special case to element 0 while fixing the off-by-one error
+                break
+            min_tri_length = min(min_tri_length, tri.aabb.length_on(axis))
+            # the inverse bound is unsorted, so we need to keep track of the maximum
+            inverse_pivot = inverse_bound_kind.max(
+                inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
+            candidate = evaluate(i, tri, inverse_pivot)
+            if candidate.score > best.score:
+                best = candidate
+        candidate = Candidate(
+            axis=axis,
+            bound_kind=bound_kind,
+            min_tri_length=min_tri_length,
+            pivot=best,
+        )
+        if best_candidate is None or candidate.score > best_candidate.score:
+            best_candidate = candidate
+
+    # TODO: check if it makes sense to put a leaf here
+    prev_len = len(sorted_tris)
+    assert 0 <= best_candidate.pivot.index < prev_len - 1, \
+        f"pivot index {best_candidate.pivot.index} violates 0 <= index < len-1 ({prev_len-1})"
+    # FIXME: I think this is ambiguous/wrong when triangles share a bound, do I need to check both bounds?
+    extracted = sorted_tris.extract(
+        best_candidate.axis, best_candidate.bound_kind.inverse, best_candidate.pivot.pivot)
+    # TODO turn this back into an assertion once it's fixed
+    if len(extracted) != best_candidate.pivot.index + 1:
+        print(
+            f"expected cut at element {best_candidate.pivot.index}/{prev_len}, not {len(sorted_tris)}")
+    # TODO: build inner node
+    # TODO: does any of this need inverting?
+    build_tree(sorted_tris, aabb.with_bound(best_candidate.axis,
+               best_candidate.bound_kind, best_candidate.pivot.pivot))
+    build_tree(extracted, aabb.with_bound(best_candidate.axis,
+               best_candidate.bound_kind.inverse, best_candidate.pivot.inverse_pivot))
 
 
 def export_file(report: report_func, path: str) -> None:
@@ -227,19 +453,24 @@ def export_file(report: report_func, path: str) -> None:
             f"{num_degenerates} triangle{'s' if num_degenerates > 0 else ''} ignored due to being too small to represent"
         )
     print(f"encoded {len(tris)} triangles using {len(verts)} vertices")
-    # ideas/thoughts on/sketch for building the r-tree
-    #
-    # along each axis:
-    #  sort tris once each by mins and maxs
-    # efficiently query:
-    #  how many mins/maxs are on either side of a given value on an axis,
-    #  or rather: bisect where for most even split into partitions?
-    #  then choose axis with smallest overlap? Is that a good heuristic?
-    #  keep descending until when?
-    #  at least until leafs are small enough (127 tris?)
-    #  and then still while partition overlap is low
-    # efficiently update:
-    #  partition sorted lists into two new lists for child nodes, with overlap (!?!), retaining order
+    if len(tris) == 0:
+        report({'ERROR'}, "no valid triangles found")
+        return
+    aabb = tris[0].aabb.copy()
+    print(f"{aabb=}")
+    for tri in tris[1:]:
+        aabb.extend(tri.aabb)
+    sorted_tris = SortedTriangles(by_axis_and_bound=tuple(
+        tuple(
+            LinkedList.of(sorted(tris, key=lambda tri: tri.aabb.bound(
+                axis, bound_kind), reverse=bound_kind == BoundKind.UPPER))
+            for bound_kind in BoundKind
+        )
+        for axis in Axis
+    ))
+    print("triangles pre-sorted")
+    build_tree(sorted_tris, aabb)
+    print("tree built")
 
 
 class ExportOperator(bpy.types.Operator):
