@@ -141,8 +141,14 @@ def triangle_area(a: Vector, b: Vector, c: Vector) -> float:
 
 @dataclass
 class Triangle:
+    # the data relevant for writing the file
     collision: collision_mesh.Triangle
+    # the cached bounding box, which is used for building the collision tree
     aabb: AABB
+    # Mutable partition flag.
+    # We maintain six indices into the triangles, one for each axis and bound, to quickly enumerate all sensible partitions.
+    # These indices get partitioned recursively as we build the collision tree, using this flag.
+    extract: bool = False
 
 
 class TriangleEncoder:
@@ -303,16 +309,15 @@ class SortedTriangles:
     def by_axis_and_bound(self, axis: Axis, bound_kind: BoundKind) -> LinkedList[Triangle]:
         return self.__by_axis_and_bound[axis.value][bound_kind.value]
 
-    def extract(self, axis: Axis, bound_kind: BoundKind, pivot: int) -> "SortedTriangles":
+    def extract_marked(self) -> "SortedTriangles":
+        """
+        Extracts all triangles marked with extract=True, removing them from this index.
+        """
         old_len = len(self)
-        contains = bound_kind.contains
-
-        def within_bound(tri: Triangle) -> bool:
-            return contains(pivot, tri.aabb.bound(axis, bound_kind))
-
         extracted = SortedTriangles(
             by_axis_and_bound=tuple(
-                tuple(tris.extract(within_bound) for tris in by_bound)
+                tuple(tris.extract(lambda tri: tri.extract)
+                      for tris in by_bound)
                 for by_bound in self.__by_axis_and_bound
             ),
         )
@@ -329,10 +334,13 @@ class SortedTriangles:
                 yield axis, bound_kind, self.by_axis_and_bound(axis, bound_kind)
 
 
-def build_tree(sorted_tris: SortedTriangles, aabb: AABB):
+def build_tree(sorted_tris: SortedTriangles, aabb: AABB) -> int:
+    """
+    .. image:: collision_export_tri_partition_algo.jpg
+    """
     if len(sorted_tris) <= config.FORCE_LEAF_THRESHOLD:
         # TODO build leaf
-        return
+        return 1
 
     @dataclass
     class PivotCandidate:
@@ -371,12 +379,11 @@ def build_tree(sorted_tris: SortedTriangles, aabb: AABB):
             # hopefully that will quickly reduce the physical search space,
             # if not the number of elements...
             # But we have to invert the result so smaller children score more.
-            return -(abs(outer_bound - inverse_pivot) + abs(inverse_outer_bound - pivot))
+            # Note that this is based on the assumption that checks are equally likely to occur anywhere.
+            # In practice, they probably mostly happen where lots of objects are?
+            return -abs(outer_bound - inverse_pivot) - abs(inverse_outer_bound - pivot)
 
-        def evaluate(index: int, tri: Triangle, inverse_pivot: int) -> PivotCandidate:
-            # FIXME: this is off by one, compared to inverse_pivot
-            # (this makes the result less efficient, but not wrong)
-            pivot = tri.aabb.bound(axis, bound_kind)
+        def evaluate(index: int, pivot: int, inverse_pivot: int) -> PivotCandidate:
             return PivotCandidate(
                 index=index,
                 pivot=pivot,
@@ -385,24 +392,46 @@ def build_tree(sorted_tris: SortedTriangles, aabb: AABB):
             )
 
         tri_iter = iter(enumerate(tris))
-        # assume first element is best candidate until proven otherwise
+        # For the elements before the pivot, we have to accumulate the inverse bound,
+        # a running extremum.
+        # For the elements after the pivot, we can use the bound of the first element,
+        # thanks to the sorting.
+        # We need at least one element in either partition.
+
+        # First candidate: the first partition is just the first triangle.
         i, tri = next(tri_iter)
+        # Since this is the only element, we can just use its inverse bound.
         inverse_pivot = tri.aabb.bound(axis, inverse_bound_kind)
-        best = evaluate(i, tri, inverse_pivot)
+
+        # While we're iterating over all triangles, let's also find the shortest one.
+        # That tells us how much smaller our partitions might get.
         min_tri_length = tri.aabb.length_on(axis)
+
+        # Now let's look at the other partition:
+        i, tri = next(tri_iter)
+        # Because the triangles are sorted by their bound, we just need to look at the first element's bound
+        pivot = tri.aabb.bound(axis, bound_kind)
+        best = evaluate(i, pivot, inverse_pivot)
+
+        min_tri_length = min(min_tri_length, tri.aabb.length_on(axis))
+
+        # Now move the pivot one step further.
+        # For the inverse bound, that means we need to calculate the maximum of the two elements so far.
+        inverse_pivot = inverse_bound_kind.max(
+            inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
+
         # search for better candidates
         for i, tri in tri_iter:
-            if i + 1 == len(tris):
-                # avoid 0-length remainder
-                # TODO: move this special case to element 0 while fixing the off-by-one error
-                break
-            min_tri_length = min(min_tri_length, tri.aabb.length_on(axis))
-            # the inverse bound is unsorted, so we need to keep track of the maximum
-            inverse_pivot = inverse_bound_kind.max(
-                inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
-            candidate = evaluate(i, tri, inverse_pivot)
+            pivot = tri.aabb.bound(axis, bound_kind)
+            candidate = evaluate(i, pivot, inverse_pivot)
             if candidate.score > best.score:
                 best = candidate
+
+            min_tri_length = min(min_tri_length, tri.aabb.length_on(axis))
+
+            # again, the new bound derives from the previous one and this tri
+            inverse_pivot = inverse_bound_kind.max(
+                inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
         candidate = Candidate(
             axis=axis,
             bound_kind=bound_kind,
@@ -412,23 +441,29 @@ def build_tree(sorted_tris: SortedTriangles, aabb: AABB):
         if best_candidate is None or candidate.score > best_candidate.score:
             best_candidate = candidate
 
+    if len(sorted_tris) >= 100:
+        print(f"{best_candidate.bound_kind.name} {best_candidate.pivot.index} of {len(sorted_tris)} tris on {best_candidate.axis.name} axis")
     # TODO: check if it makes sense to put a leaf here
     prev_len = len(sorted_tris)
-    assert 0 <= best_candidate.pivot.index < prev_len - 1, \
-        f"pivot index {best_candidate.pivot.index} violates 0 <= index < len-1 ({prev_len-1})"
-    # FIXME: I think this is ambiguous/wrong when triangles share a bound, do I need to check both bounds?
-    extracted = sorted_tris.extract(
-        best_candidate.axis, best_candidate.bound_kind.inverse, best_candidate.pivot.pivot)
-    # TODO turn this back into an assertion once it's fixed
-    if len(extracted) != best_candidate.pivot.index + 1:
-        print(
-            f"expected cut at element {best_candidate.pivot.index}/{prev_len}, not {len(sorted_tris)}")
+    assert 0 < best_candidate.pivot.index < prev_len, \
+        f"pivot index {best_candidate.pivot.index} violates 0 < index < len ({prev_len})"
+
+    # mark selected triangles for extraction...
+    for i, tri in enumerate(sorted_tris.by_axis_and_bound(best_candidate.axis, best_candidate.bound_kind)):
+        tri.extract = i >= best_candidate.pivot.index
+    # ... and extract them
+    extracted = sorted_tris.extract_marked()
+    assert len(sorted_tris) == best_candidate.pivot.index, \
+        f"expected cut at element {best_candidate.pivot.index}/{prev_len}, not {len(sorted_tris)}"
+    assert len(sorted_tris) < prev_len
+    assert len(extracted) < prev_len
+
+    d1 = build_tree(sorted_tris, aabb.with_bound(best_candidate.axis,
+                                                 best_candidate.bound_kind.inverse, best_candidate.pivot.inverse_pivot))
+    d2 = build_tree(extracted, aabb.with_bound(best_candidate.axis,
+                                               best_candidate.bound_kind, best_candidate.pivot.pivot))
     # TODO: build inner node
-    # TODO: does any of this need inverting?
-    build_tree(sorted_tris, aabb.with_bound(best_candidate.axis,
-               best_candidate.bound_kind, best_candidate.pivot.pivot))
-    build_tree(extracted, aabb.with_bound(best_candidate.axis,
-               best_candidate.bound_kind.inverse, best_candidate.pivot.inverse_pivot))
+    return max(d1, d2) + 1
 
 
 def export_file(report: report_func, path: str) -> None:
@@ -462,15 +497,25 @@ def export_file(report: report_func, path: str) -> None:
         aabb.extend(tri.aabb)
     sorted_tris = SortedTriangles(by_axis_and_bound=tuple(
         tuple(
-            LinkedList.of(sorted(tris, key=lambda tri: tri.aabb.bound(
-                axis, bound_kind), reverse=bound_kind == BoundKind.UPPER))
+            # By pre-sorting, we can later iterate through all possible partitions along this axis and bound in one linear pass.
+            # We store the result in a linked list, because we can partition that without any allocations while retaining its order,
+            # so we can recursively partition the list into a tree.
+            LinkedList.of(sorted(
+                tris,
+                key=lambda tri: (
+                    tri.aabb.bound(axis, bound_kind),
+                    tri.aabb.bound(axis, bound_kind.inverse)
+                ),
+                reverse=bound_kind == BoundKind.UPPER,
+            ))
             for bound_kind in BoundKind
         )
         for axis in Axis
     ))
     print("triangles pre-sorted")
-    build_tree(sorted_tris, aabb)
-    print("tree built")
+    depth = build_tree(sorted_tris, aabb)
+    print(
+        f"built tree with detph {depth} for {len(tris)} triangles")
 
 
 class ExportOperator(bpy.types.Operator):
