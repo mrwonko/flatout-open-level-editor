@@ -348,6 +348,10 @@ class Leaf:
     def average_depth(self) -> int:
         return 1
 
+    @property
+    def leafs(self) -> Generator["Leaf", None, None]:
+        yield self
+
 
 @dataclass
 class InnerNode:
@@ -366,6 +370,13 @@ class InnerNode:
     @property
     def average_depth(self) -> float:
         return (self.inside_lower_bound.depth + self.inside_upper_bound.depth) / 2 + 1
+
+    @property
+    def leafs(self) -> Generator[Leaf, None, None]:
+        for leaf in self.inside_upper_bound.leafs:
+            yield leaf
+        for leaf in self.inside_lower_bound.leafs:
+            yield leaf
 
 
 Node = Union[Leaf, InnerNode]
@@ -571,8 +582,13 @@ def export_file(report: report_func, path: str) -> None:
         __next_index += 1
         return res
     root = build_tree(next_index(), next_index, sorted_tris, aabb)
+    num_leafs = 0
+    leaf_tris = 0
+    for leaf in root.leafs:
+        num_leafs += 1
+        leaf_tris += len(leaf.tris)
     print(
-        f"built tree of depth {root.depth} (average {root.average_depth}) for {len(tris)} triangles")
+        f"built tree of depth {root.depth} (average {root.average_depth}) with {num_leafs} leafs (avg {leaf_tris / (num_leafs or 1)} tris each) for {len(tris)} triangles")
 
 
 class ExportOperator(bpy.types.Operator):
