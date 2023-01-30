@@ -389,7 +389,6 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
     class Candidate:
         axis: Axis
         bound_kind: BoundKind
-        min_tri_length: int
         pivot: PivotCandidate
 
         @property
@@ -403,6 +402,8 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
                 return -2
 
     prev_len = len(sorted_tris)
+    # let's build a balanced tree by bisecting in the middle
+    pivot_idx = prev_len // 2
     best_candidate: Optional[Candidate] = None
     for axis, bound_kind, tris in sorted_tris:
         inverse_bound_kind = bound_kind.inverse
@@ -411,11 +412,8 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
 
         def score(pivot: int, inverse_pivot: int) -> int:
             # We score by the combined size of the children,
-            # hopefully that will quickly reduce the physical search space,
-            # if not the number of elements...
+            # hopefully that will quickly reduce the physical search space.
             # But we have to invert the result so smaller children score more.
-            # Note that this is based on the assumption that checks are equally likely to occur anywhere.
-            # In practice, they probably mostly happen where lots of objects are?
             return -abs(outer_bound - inverse_pivot) - abs(inverse_outer_bound - pivot)
 
         def evaluate(index: int, pivot: int, inverse_pivot: int) -> PivotCandidate:
@@ -442,39 +440,17 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
         # Since this is the only element, we can just use its inverse bound.
         inverse_pivot = tri.aabb.bound(axis, inverse_bound_kind)
 
-        # While we're iterating over all triangles, let's also find the shortest one.
-        # That tells us how much smaller our partitions might get.
-        min_tri_length = tri.aabb.length_on(axis)
-
-        # Now let's look at the other partition:
-        i, tri = next(tri_iter)
-        # Because the triangles are sorted by their bound, we just need to look at the first element's bound
-        pivot = tri.aabb.bound(axis, bound_kind)
-        best = evaluate(i, pivot, inverse_pivot)
-
-        min_tri_length = min(min_tri_length, tri.aabb.length_on(axis))
-
-        # Now move the pivot one step further.
-        # For the inverse bound, that means we need to calculate the maximum of the two elements so far.
-        inverse_pivot = inverse_bound_kind.max(
-            inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
-
-        # search for better candidates
         for i, tri in tri_iter:
-            pivot = tri.aabb.bound(axis, bound_kind)
-            candidate = evaluate(i, pivot, inverse_pivot)
-            if candidate.score > best.score:
-                best = candidate
-
-            min_tri_length = min(min_tri_length, tri.aabb.length_on(axis))
-
-            # again, the new bound derives from the previous one and this tri
+            if i == pivot_idx:
+                pivot = tri.aabb.bound(axis, bound_kind)
+                best = evaluate(i, pivot, inverse_pivot)
+                break
+            # for the inverse bound we need to calculate the maximum of the elements so far.
             inverse_pivot = inverse_bound_kind.max(
                 inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
         candidate = Candidate(
             axis=axis,
             bound_kind=bound_kind,
-            min_tri_length=min_tri_length,
             pivot=best,
         )
         # within an axis, we can compare absolute total child length,
