@@ -334,13 +334,49 @@ class SortedTriangles:
                 yield axis, bound_kind, self.by_axis_and_bound(axis, bound_kind)
 
 
-def build_tree(sorted_tris: SortedTriangles, aabb: AABB) -> int:
+@dataclass
+class Leaf:
+    tris: LinkedList[Triangle]
+
+    index: int
+
+    @property
+    def depth(self) -> int:
+        return 1
+
+    @property
+    def average_depth(self) -> int:
+        return 1
+
+
+@dataclass
+class InnerNode:
+    axis: Axis
+    inside_upper_bound: "Node"
+    upper_bound: int
+    inside_lower_bound: "Node"
+    lower_bound: int
+
+    index: int
+
+    @property
+    def depth(self) -> int:
+        return max(self.inside_lower_bound.depth, self.inside_upper_bound.depth) + 1
+
+    @property
+    def average_depth(self) -> float:
+        return (self.inside_lower_bound.depth + self.inside_upper_bound.depth) / 2 + 1
+
+
+Node = Union[Leaf, InnerNode]
+
+
+def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTriangles, aabb: AABB) -> Node:
     """
     .. image:: collision_export_tri_partition_algo.jpg
     """
     if len(sorted_tris) <= config.FORCE_LEAF_THRESHOLD:
-        # TODO build leaf
-        return 1
+        return Leaf(tris=sorted_tris, index=index)
 
     @dataclass
     class PivotCandidate:
@@ -357,17 +393,16 @@ def build_tree(sorted_tris: SortedTriangles, aabb: AABB) -> int:
         pivot: PivotCandidate
 
         @property
-        def score(self) -> float:
-            # within an axis, we can compare absolute total child length,
-            # but across axes we should compare relative child length
-            # TODO: take min_tri_length/aabb.length_on(self.axis) into account?
+        def scaled_score(self) -> float:
             try:
                 # this should be within [-2, 0]
+                # FIXME: Is this a suitable way to scale? Is halving a tiny axis truly better than recuding a massive one by 25%?
                 return self.pivot.score / aabb.length_on(self.axis)
             except ZeroDivisionError:
                 # if this axis is already empty, it's as bad as two 100% children
                 return -2
 
+    prev_len = len(sorted_tris)
     best_candidate: Optional[Candidate] = None
     for axis, bound_kind, tris in sorted_tris:
         inverse_bound_kind = bound_kind.inverse
@@ -399,6 +434,10 @@ def build_tree(sorted_tris: SortedTriangles, aabb: AABB) -> int:
         # We need at least one element in either partition.
 
         # First candidate: the first partition is just the first triangle.
+        # FIXME: Maybe the partition with no triangles is the first candidate?
+        #        That's useful when the bounds overextend, which they probably will.
+        #        But by requiring at least one element, we avoid empty leafs,
+        #        for which we should otherwise implement a flyweight.
         i, tri = next(tri_iter)
         # Since this is the only element, we can just use its inverse bound.
         inverse_pivot = tri.aabb.bound(axis, inverse_bound_kind)
@@ -438,13 +477,25 @@ def build_tree(sorted_tris: SortedTriangles, aabb: AABB) -> int:
             min_tri_length=min_tri_length,
             pivot=best,
         )
-        if best_candidate is None or candidate.score > best_candidate.score:
+        # within an axis, we can compare absolute total child length,
+        # but across axes we should compare relative child length
+        # TODO: take min_tri_length/aabb.length_on(self.axis) into account?
+        if best_candidate is None or candidate.scaled_score > best_candidate.scaled_score:
             best_candidate = candidate
 
     if len(sorted_tris) >= 100:
         print(f"{best_candidate.bound_kind.name} {best_candidate.pivot.index} of {len(sorted_tris)} tris on {best_candidate.axis.name} axis")
-    # TODO: check if it makes sense to put a leaf here
-    prev_len = len(sorted_tris)
+
+    if (
+        # necessary condition: few enough triangles for a leaf
+        len(sorted_tris) <= cdb2.MAX_TRIANGLE_COUNT and
+        # The score expresses how much we reduce the search space.
+        # Only create leafs when there is no more significant reduction in the search space
+        best_candidate.scaled_score <= config.MAX_LEAF_SCORE
+        # TODO: further refine heuristic for early leaf
+    ):
+        return Leaf(tris=sorted_tris, index=index)
+
     assert 0 < best_candidate.pivot.index < prev_len, \
         f"pivot index {best_candidate.pivot.index} violates 0 < index < len ({prev_len})"
 
@@ -458,12 +509,35 @@ def build_tree(sorted_tris: SortedTriangles, aabb: AABB) -> int:
     assert len(sorted_tris) < prev_len
     assert len(extracted) < prev_len
 
-    d1 = build_tree(sorted_tris, aabb.with_bound(best_candidate.axis,
-                                                 best_candidate.bound_kind.inverse, best_candidate.pivot.inverse_pivot))
-    d2 = build_tree(extracted, aabb.with_bound(best_candidate.axis,
-                                               best_candidate.bound_kind, best_candidate.pivot.pivot))
-    # TODO: build inner node
-    return max(d1, d2) + 1
+    axis = best_candidate.axis
+    if bound_kind == BoundKind.LOWER:
+        lower_bound = best_candidate.pivot.pivot
+        tris_inside_lower_bound = extracted
+        upper_bound = best_candidate.pivot.inverse_pivot
+        tris_inside_upper_bound = sorted_tris
+    else:
+        lower_bound = best_candidate.pivot.inverse_pivot
+        tris_inside_lower_bound = sorted_tris
+        upper_bound = best_candidate.pivot.pivot
+        tris_inside_upper_bound = extracted
+
+    # the encoding requires the children to have consecutive indices
+    idx0 = next_index()
+    idx1 = next_index()
+
+    # the order of these is determined by the encoding, i.e. fixed
+    subtree_inside_upper_bound = build_tree(idx0, next_index, tris_inside_upper_bound,
+                                            aabb.with_bound(axis, BoundKind.UPPER, upper_bound))
+    subtree_inside_lower_bound = build_tree(idx1, next_index, tris_inside_lower_bound,
+                                            aabb.with_bound(axis, BoundKind.LOWER, lower_bound))
+    return InnerNode(
+        axis=axis,
+        inside_upper_bound=subtree_inside_upper_bound,
+        upper_bound=upper_bound,
+        inside_lower_bound=subtree_inside_lower_bound,
+        lower_bound=lower_bound,
+        index=index,
+    )
 
 
 def export_file(report: report_func, path: str) -> None:
@@ -513,9 +587,16 @@ def export_file(report: report_func, path: str) -> None:
         for axis in Axis
     ))
     print("triangles pre-sorted")
-    depth = build_tree(sorted_tris, aabb)
+    __next_index = 0
+
+    def next_index() -> int:
+        nonlocal __next_index
+        res = __next_index
+        __next_index += 1
+        return res
+    root = build_tree(next_index(), next_index, sorted_tris, aabb)
     print(
-        f"built tree with detph {depth} for {len(tris)} triangles")
+        f"built tree of depth {root.depth} (average {root.average_depth}) for {len(tris)} triangles")
 
 
 class ExportOperator(bpy.types.Operator):

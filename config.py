@@ -51,3 +51,5 @@ COORDINATE_UTILIZATION_WARN_THRESHOLD = 0.75
 # if the number of triangles in a node drops to or below this threshold, it must become a leaf
 # (it may already become a leaf earlier due to other heuristics)
 FORCE_LEAF_THRESHOLD = 1  # TODO: how high can we have this?
+# a node's score must be worse than this for us to consider a leaf instead
+MAX_LEAF_SCORE = -1.5

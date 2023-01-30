@@ -13,6 +13,7 @@ LEAF_MASK_BITS = 4
 LEAF_KIND_BITS = 3
 # 19b vertex offset, 6b flags, 7b triangle count
 LEAF_TRIANGLE_COUNT_BITS = 7
+MAX_TRIANGLE_COUNT = (1 << LEAF_TRIANGLE_COUNT_BITS) - 1
 LEAF_FLAGS_BITS = 6
 
 # AABB tree inner nodes
