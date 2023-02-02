@@ -414,8 +414,9 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
 
     prev_len = len(sorted_tris)
     # let's build a balanced tree by bisecting in the middle
-    pivot_idx = prev_len // 2
-    best_candidate: Optional[Candidate] = None
+    min_pivot_idx = round(prev_len * config.MIN_PARTITION_RATIO)
+    max_pivot_idx = round(prev_len * (1 - config.MIN_PARTITION_RATIO))
+    best: Optional[Candidate] = None
     for axis, bound_kind, tris in sorted_tris:
         inverse_bound_kind = bound_kind.inverse
         outer_bound = aabb.bound(axis, bound_kind)
@@ -452,60 +453,71 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
         inverse_pivot = tri.aabb.bound(axis, inverse_bound_kind)
 
         for i, tri in tri_iter:
-            if i == pivot_idx:
-                pivot = tri.aabb.bound(axis, bound_kind)
-                best = evaluate(i, pivot, inverse_pivot)
+            if i == min_pivot_idx:
                 break
             # for the inverse bound we need to calculate the maximum of the elements so far.
             inverse_pivot = inverse_bound_kind.max(
                 inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
+        pivot = tri.aabb.bound(axis, bound_kind)
+        local_best = evaluate(i, pivot, inverse_pivot)
+        inverse_pivot = inverse_bound_kind.max(
+            inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
+        for i, tri in tri_iter:
+            if i > max_pivot_idx:
+                break
+            pivot = tri.aabb.bound(axis, bound_kind)
+            local_candidate = evaluate(i, pivot, inverse_pivot)
+            inverse_pivot = inverse_bound_kind.max(
+                inverse_pivot, tri.aabb.bound(axis, inverse_bound_kind))
+            if local_candidate.score > local_best.score:
+                local_best = local_candidate
+
         candidate = Candidate(
             axis=axis,
             bound_kind=bound_kind,
-            pivot=best,
+            pivot=local_best,
         )
         # within an axis, we can compare absolute total child length,
         # but across axes we should compare relative child length
         # TODO: take min_tri_length/aabb.length_on(self.axis) into account?
-        if best_candidate is None or candidate.scaled_score > best_candidate.scaled_score:
-            best_candidate = candidate
-
-    if len(sorted_tris) >= 100:
-        print(f"{best_candidate.bound_kind.name} {best_candidate.pivot.index} of {len(sorted_tris)} tris on {best_candidate.axis.name} axis")
+        if best is None or candidate.scaled_score > best.scaled_score:
+            best = candidate
 
     if (
         # necessary condition: few enough triangles for a leaf
         len(sorted_tris) <= cdb2.MAX_TRIANGLE_COUNT and
         # The score expresses how much we reduce the search space.
         # Only create leafs when there is no more significant reduction in the search space
-        best_candidate.scaled_score <= config.MAX_LEAF_SCORE
+        best.scaled_score <= config.MAX_LEAF_SCORE
         # TODO: further refine heuristic for early leaf
     ):
+        # TODO collect statistics to optimise the heuristic
+        # print(f"early leaf with {len(sorted_tris)} tris")
         return Leaf(tris=sorted_tris, index=index)
 
-    assert 0 < best_candidate.pivot.index < prev_len, \
-        f"pivot index {best_candidate.pivot.index} violates 0 < index < len ({prev_len})"
+    assert 0 < best.pivot.index < prev_len, \
+        f"pivot index {best.pivot.index} violates 0 < index < len ({prev_len})"
 
     # mark selected triangles for extraction...
-    for i, tri in enumerate(sorted_tris.by_axis_and_bound(best_candidate.axis, best_candidate.bound_kind)):
-        tri.extract = i >= best_candidate.pivot.index
+    for i, tri in enumerate(sorted_tris.by_axis_and_bound(best.axis, best.bound_kind)):
+        tri.extract = i >= best.pivot.index
     # ... and extract them
     extracted = sorted_tris.extract_marked()
-    assert len(sorted_tris) == best_candidate.pivot.index, \
-        f"expected cut at element {best_candidate.pivot.index}/{prev_len}, not {len(sorted_tris)}"
+    assert len(sorted_tris) == best.pivot.index, \
+        f"expected cut at element {best.pivot.index}/{prev_len}, not {len(sorted_tris)}"
     assert len(sorted_tris) < prev_len
     assert len(extracted) < prev_len
 
-    axis = best_candidate.axis
+    axis = best.axis
     if bound_kind == BoundKind.LOWER:
-        lower_bound = best_candidate.pivot.pivot
+        lower_bound = best.pivot.pivot
         tris_inside_lower_bound = extracted
-        upper_bound = best_candidate.pivot.inverse_pivot
+        upper_bound = best.pivot.inverse_pivot
         tris_inside_upper_bound = sorted_tris
     else:
-        lower_bound = best_candidate.pivot.inverse_pivot
+        lower_bound = best.pivot.inverse_pivot
         tris_inside_lower_bound = sorted_tris
-        upper_bound = best_candidate.pivot.pivot
+        upper_bound = best.pivot.pivot
         tris_inside_upper_bound = extracted
 
     # the encoding requires the children to have consecutive indices
@@ -582,13 +594,14 @@ def export_file(report: report_func, path: str) -> None:
         __next_index += 1
         return res
     root = build_tree(next_index(), next_index, sorted_tris, aabb)
+    print("built tree")
     num_leafs = 0
     leaf_tris = 0
     for leaf in root.leafs:
         num_leafs += 1
         leaf_tris += len(leaf.tris)
     print(
-        f"built tree of depth {root.depth} (average {root.average_depth}) with {num_leafs} leafs (avg {leaf_tris / (num_leafs or 1)} tris each) for {len(tris)} triangles")
+        f"depth {root.depth} (average {root.average_depth}) with {num_leafs} leafs (avg {leaf_tris / (num_leafs or 1)} tris each) for {len(tris)} triangles")
 
 
 class ExportOperator(bpy.types.Operator):

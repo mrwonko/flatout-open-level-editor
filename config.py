@@ -50,6 +50,10 @@ COORDINATE_UTILIZATION_WARN_THRESHOLD = 0.75
 
 # if the number of triangles in a node drops to or below this threshold, it must become a leaf
 # (it may already become a leaf earlier due to other heuristics)
-FORCE_LEAF_THRESHOLD = 1  # TODO: how high can we have this?
+FORCE_LEAF_THRESHOLD = 5  # TODO: how high should this be?
 # a node's score must be worse than this for us to consider a leaf instead
 MAX_LEAF_SCORE = -1.5
+# We only consider splits with at least this ratio,
+# i.e. both partitions (sub-trees) must contain at least this fraction of triangles.
+# This limits the maximum depth of the tree.
+MIN_PARTITION_RATIO = 0.25
