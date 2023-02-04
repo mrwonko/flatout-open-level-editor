@@ -486,8 +486,14 @@ def material_properties_draw_func(self: bpy.types.Panel, context: bpy.types.Cont
     ob = context.object
     box = layout.box()
     box.label(text="FlatOut 2 Collision")
-    box.prop(ob.active_material.fo2, "collision_surface")
-    box.prop(ob.active_material.fo2, "collision_flags")
+    # FIXME: this check always fails
+    if (fo2 := ob.active_material.fo2) == None:
+        # TODO: show "add fo2 properties" button
+        # box.operator()
+        pass
+    else:
+        box.prop(ob.active_material.fo2, "collision_surface")
+        box.prop(ob.active_material.fo2, "collision_flags")
 
 
 class MaterialManager:
