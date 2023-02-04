@@ -352,6 +352,12 @@ class Leaf:
     def leafs(self) -> Generator["Leaf", None, None]:
         yield self
 
+    def __len__(self) -> int:
+        return 1
+
+    def __iter__(self) -> Generator["Node", None, None]:
+        yield self
+
 
 @dataclass
 class InnerNode:
@@ -377,6 +383,16 @@ class InnerNode:
             yield leaf
         for leaf in self.inside_lower_bound.leafs:
             yield leaf
+
+    def __len__(self) -> int:
+        return len(self.inside_upper_bound) + len(self.inside_lower_bound) + 1
+
+    def __iter__(self) -> Generator["Node", None, None]:
+        yield self
+        for e in self.inside_upper_bound:
+            yield e
+        for e in self.inside_lower_bound:
+            yield e
 
 
 Node = Union[Leaf, InnerNode]
@@ -601,7 +617,14 @@ def export_file(report: report_func, path: str) -> None:
         num_leafs += 1
         leaf_tris += len(leaf.tris)
     print(
-        f"depth {root.depth} (average {root.average_depth}) with {num_leafs} leafs (avg {leaf_tris / (num_leafs or 1)} tris each) for {len(tris)} triangles")
+        f"depth {root.depth} (average {root.average_depth}) with {num_leafs} leafs (avg {leaf_tris / (num_leafs or 1)} tris each) and {len(root)} total nodes for {len(tris)} triangles")
+    # flatten the tree using the pre-assigned indices
+    flattened_nodes: List[Optional[Node]] = [None] * len(root)
+    for node in root:
+        assert flattened_nodes[node.index] == None, f"duplicate node index {node.index}"
+        flattened_nodes[node.index] = node
+    assert not any(
+        node == None for node in flattened_nodes), "flattened nodes have gaps"
 
 
 class ExportOperator(bpy.types.Operator):
