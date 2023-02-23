@@ -581,7 +581,6 @@ def export_file(report: report_func, path: str) -> None:
         report({'ERROR'}, "no valid triangles found")
         return
     aabb = tris[0].aabb.copy()
-    print(f"{aabb=}")
     for tri in tris[1:]:
         aabb.extend(tri.aabb)
     sorted_tris = SortedTriangles(by_axis_and_bound=tuple(
@@ -602,6 +601,7 @@ def export_file(report: report_func, path: str) -> None:
         for axis in Axis
     ))
     print("triangles pre-sorted")
+    print(f"{aabb=}")
     __next_index = 0
 
     def next_index() -> int:
