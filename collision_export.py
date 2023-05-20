@@ -86,6 +86,21 @@ def check_coordinate_space_utilization(report: report_func, bounds: AABB) -> Vec
 MAX_ABS_COORDINATE = (1 << (cdb2.COORDINATE_BITS - 1)) - 1
 
 
+T = TypeVar("T")
+
+
+def z_up_to_y_up(vert: List[T]) -> List[T]:
+    """
+    convert from Blender coordinates (Z-axis is up)
+    to file format coordinates (Y-axis is up)
+    """
+    return [
+        vert[0],
+        vert[2],
+        vert[1],
+    ]
+
+
 def calculate_axis_multipliers(report: report_func, collision_meshes: Iterable[bpy.types.Object]) -> Vector:
     if len(collision_meshes) == 0:
         raise ExportError("no meshes found in \"collision\" collection")
@@ -95,7 +110,7 @@ def calculate_axis_multipliers(report: report_func, collision_meshes: Iterable[b
     max_abs_bounds = check_coordinate_space_utilization(
         report=report,
         bounds=bounds)
-    return Vector([MAX_ABS_COORDINATE/e for e in max_abs_bounds])
+    return Vector(z_up_to_y_up([MAX_ABS_COORDINATE/e for e in max_abs_bounds]))
 
 
 vec3_scaled = NewType("vec3_scaled", Tuple[int, int, int])
@@ -125,7 +140,7 @@ class VertexEncoder:
         return self._vertices
 
     def scale_vert(self, vert: Vector) -> vec3_scaled:
-        # TODO move this out of here, it no longer belongs here
+        # TODO move this function out of this class, it no longer belongs here
         res = vec3_scaled(
             tuple(round(self._axis_multipliers[i]*vert[i]) for i in range(3)))
         # sanity check: ensure we're within the valid range
@@ -165,7 +180,10 @@ class TriangleEncoder:
         Degenerate triangles (i.e. with collinear vertices) are invalid and get dropped.
         This can happen due to the rounding involved in quantizing the coordinates.
         """
-        scaled_verts = [self._vertex_encoder.scale_vert(v) for v in verts]
+        # we do the Y-Z flip ASAP so subsequent steps don't need to worry about it,
+        # particularly the collision tree axis selection
+        scaled_verts = [self._vertex_encoder.scale_vert(
+            z_up_to_y_up(v)) for v in verts]
         vert_indices: Tuple[int, int, int] = tuple(
             self._vertex_encoder.upsert(v) for v in scaled_verts)
         degenerate = triangle_area(
@@ -735,27 +753,13 @@ def encode_leaf_and_write_tri_data(leaf: Leaf, tri_data: bytearray) -> bytes:
     return struct.pack("<2I", lo, hi)
 
 
-T = TypeVar("T")
-
-
-def z_up_to_y_up(vert: List[T]) -> List[T]:
-    """
-    convert from Blender coordinates (Z-axis is up)
-    to file format coordinates (Y-axis is up)
-    """
-    return [
-        vert[0],
-        vert[2],
-        vert[1],
-    ]
-
-
 def export_file(report: report_func, path: str) -> None:
     print(f"export to \"{path}\"")
 
     collision_meshes = find_collision_meshes()
     print(f"found {len(collision_meshes)} collision meshes")
 
+    # these already have Y and Z flipped
     axis_multipliers = calculate_axis_multipliers(
         report=report,
         collision_meshes=collision_meshes)
@@ -839,9 +843,8 @@ def export_file(report: report_func, path: str) -> None:
         f.write(b"\x00\x00\x00\x00")
         f.write(struct.pack("<3i", *(round(v) for v in aabb.min)))
         f.write(struct.pack("<3i", *(round(v) for v in aabb.max)))
-        f.write(struct.pack(
-            "<3f", *z_up_to_y_up([1/v for v in axis_multipliers])))
-        f.write(struct.pack("<3f", *z_up_to_y_up(axis_multipliers)))
+        f.write(struct.pack("<3f", *(1/v for v in axis_multipliers)))
+        f.write(struct.pack("<3f", *axis_multipliers))
         node_len = cdb2.NODE_SIZE * len(flattened_nodes)
         f.write(struct.pack("<I", node_len))
         tri_len = len(tri_data)
@@ -854,7 +857,7 @@ def export_file(report: report_func, path: str) -> None:
         for vert in verts:
             # I'm not sure this is the best place to do the coordinate flip,
             # but it works well enough
-            f.write(struct.pack("<3h", *z_up_to_y_up(vert)))
+            f.write(struct.pack("<3h", *vert))
     print("export successful")
     report(
         {'INFO'},
