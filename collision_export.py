@@ -685,9 +685,10 @@ def encode_leaf_and_write_tri_data(leaf: Leaf, tri_data: bytearray) -> bytes:
     flags = tri.collision.flags & ones(6)
     enc.write(tri.collision.flags >> 8 & ones(6), 6)
     enc.write(tri.collision.flags >> 16 & ones(2), 2)
-    vert_ofs = tri.collision.vert_indices[0]
-    enc.write(tri.collision.vert_indices[1], 19)
-    enc.write(tri.collision.vert_indices[2], 21)
+    # the file format indices are by coordinate, but they come in triples
+    vert_ofs = tri.collision.vert_indices[0]*3
+    enc.write(tri.collision.vert_indices[1]*3, 19)
+    enc.write(tri.collision.vert_indices[2]*3, 21)
     enc.reset_written(6)
 
     for tri in it:
@@ -695,9 +696,9 @@ def encode_leaf_and_write_tri_data(leaf: Leaf, tri_data: bytearray) -> bytes:
         enc.write(tri.collision.flags >> 16 & ones(2), 2)
         enc.write(tri.collision.flags & ones(6), 6)
         enc.write(0, 1)
-        enc.write(tri.collision.vert_indices[0], 19)
-        enc.write(tri.collision.vert_indices[1], 19)
-        enc.write(tri.collision.vert_indices[2], 19)
+        enc.write(tri.collision.vert_indices[0]*3, 19)
+        enc.write(tri.collision.vert_indices[1]*3, 19)
+        enc.write(tri.collision.vert_indices[2]*3, 19)
         enc.reset_written(9)
 
     assert tri_ofs <= ones(cdb2.LEAF_TRIANGLE_OFS_BITS), \
