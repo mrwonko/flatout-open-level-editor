@@ -3,7 +3,7 @@ reload_modules(locals(), __package__, ["cdb2", "config", "collision_mesh"], [".b
 
 from .bitmath import ones
 from dataclasses import dataclass
-from typing import Callable, Dict, Generator, Iterable, Iterator, List, NewType, Optional, Set, Tuple, Union, cast
+from typing import Callable, Dict, Generator, Iterable, Iterator, List, NewType, Optional, Set, Tuple, TypeVar, Union, cast
 from .geometry import AABB, Axis, BoundKind, vector_abs, vector_max, vector_min
 from .list import LinkedList
 from . import cdb2, collision_mesh, config
@@ -735,6 +735,21 @@ def encode_leaf_and_write_tri_data(leaf: Leaf, tri_data: bytearray) -> bytes:
     return struct.pack("<2I", lo, hi)
 
 
+T = TypeVar("T")
+
+
+def z_up_to_y_up(vert: List[T]) -> List[T]:
+    """
+    convert from Blender coordinates (Z-axis is up)
+    to file format coordinates (Y-axis is up)
+    """
+    return [
+        vert[0],
+        vert[2],
+        vert[1],
+    ]
+
+
 def export_file(report: report_func, path: str) -> None:
     print(f"export to \"{path}\"")
 
@@ -824,8 +839,9 @@ def export_file(report: report_func, path: str) -> None:
         f.write(b"\x00\x00\x00\x00")
         f.write(struct.pack("<3i", *(round(v) for v in aabb.min)))
         f.write(struct.pack("<3i", *(round(v) for v in aabb.max)))
-        f.write(struct.pack("<3f", *(1/v for v in axis_multipliers)))
-        f.write(struct.pack("<3f", *axis_multipliers))
+        f.write(struct.pack(
+            "<3f", *z_up_to_y_up([1/v for v in axis_multipliers])))
+        f.write(struct.pack("<3f", *z_up_to_y_up(axis_multipliers)))
         node_len = cdb2.NODE_SIZE * len(flattened_nodes)
         f.write(struct.pack("<I", node_len))
         tri_len = len(tri_data)
@@ -836,8 +852,9 @@ def export_file(report: report_func, path: str) -> None:
         f.write(encoded_nodes)
         f.write(tri_data)
         for vert in verts:
-            # TODO verify flipping is required here, but I do it on import, so probably
-            f.write(struct.pack("<3h", vert[2], vert[1], vert[0]))
+            # I'm not sure this is the best place to do the coordinate flip,
+            # but it works well enough
+            f.write(struct.pack("<3h", *z_up_to_y_up(vert)))
     print("export successful")
     report(
         {'INFO'},
