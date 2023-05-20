@@ -178,7 +178,8 @@ class TriangleEncoder:
         self._tris.append(Triangle(
             collision=collision_mesh.Triangle(
                 flags=flags,
-                vert_indices=vert_indices,
+                # reverse indices to flip normals
+                vert_indices=tuple(reversed(vert_indices)),
             ),
             aabb=AABB.around(scaled_verts),
             bitmask=encode_bitarray(bitmask),
