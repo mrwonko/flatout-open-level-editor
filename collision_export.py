@@ -614,7 +614,7 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
     assert len(extracted) < prev_len
 
     axis = best.axis
-    if bound_kind == BoundKind.LOWER:
+    if best.bound_kind == BoundKind.LOWER:
         lower_bound = best.pivot.inverse_pivot
         tris_inside_lower_bound = extracted
         upper_bound = best.pivot.pivot
