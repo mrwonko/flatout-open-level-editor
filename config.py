@@ -41,6 +41,11 @@ SURFACE_COLORS: Dict[int, mathutils.Color] = {
     7: COLOR_TARMAC,
     # TODO: more colors
 }
+BITMASK_COLORS: Dict[int, mathutils.Color] = {
+    0b1011: mathutils.Color((0.7, 0.7, 0.7)),
+    0b0011: mathutils.Color((0, 0.7, 0.7)),
+    0b0001: mathutils.Color((0, 0, 0.7)),
+}
 
 # export
 

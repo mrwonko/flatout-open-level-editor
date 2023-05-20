@@ -479,6 +479,14 @@ class MaterialProperties(bpy.types.PropertyGroup):
         default=[False]*(6+2),
         subtype="LAYER",
     )
+    collision_bitmask: bpy.props.BoolVectorProperty(
+        name="Bitmask",
+        # TODO: determine and document meaning
+        description="Flags with unknown meaning. Seem to be used for filtering on collision check.",
+        size=cdb2.LEAF_MASK_BITS,
+        default=[False]*cdb2.LEAF_MASK_BITS,
+        subtype="LAYER",
+    )
 
 
 def material_properties_draw_func(self: bpy.types.Panel, context: bpy.types.Context):
@@ -494,6 +502,16 @@ def material_properties_draw_func(self: bpy.types.Panel, context: bpy.types.Cont
     else:
         box.prop(ob.active_material.fo2, "collision_surface")
         box.prop(ob.active_material.fo2, "collision_flags")
+        box.prop(ob.active_material.fo2, "collision_bitmask")
+
+
+def material_color(surface: int, bitmask: int) -> Optional[mathutils.Color]:
+    try:
+        return config.BITMASK_COLORS[bitmask]
+        return config.SURFACE_COLORS[surface]
+    except KeyError:
+        return mathutils.Color((0.3, 0.3, 0.3))
+        return None
 
 
 class MaterialManager:
@@ -502,17 +520,18 @@ class MaterialManager:
     """
 
     def __init__(self) -> None:
-        self._materials: Dict[PackedMaterial, bpy.types.Material] = {}
+        self._materials: Dict[Tuple[PackedMaterial, int],
+                              bpy.types.Material] = {}
 
-    def get_or_create(self, packed_material: PackedMaterial) -> bpy.types.Material:
+    def get_or_create(self, packed_material: PackedMaterial, bitmask: int) -> bpy.types.Material:
         try:
-            return self._materials[packed_material]
+            return self._materials[(packed_material, bitmask)]
         except KeyError:
-            mat = self._create(packed_material)
-            self._materials[packed_material] = mat
+            mat = self._create(packed_material, bitmask)
+            self._materials[(packed_material, bitmask)] = mat
             return mat
 
-    def _create(self, packed_material: PackedMaterial) -> bpy.types.Material:
+    def _create(self, packed_material: PackedMaterial, bitmask: int) -> bpy.types.Material:
         # we're using Lua-style 1-based indices here to match the indices in surfaces.bed
         surface = (packed_material & ones(6)) + 1
         loflags = (packed_material >> 8) & ones(6)
@@ -520,22 +539,22 @@ class MaterialManager:
         flags = hiflags << 6 | loflags
         # TODO find out what each flag means and decide how to display them.
         # For now, I group the flags like they are in the packed data.
-        name = f"col_{surface}_{hiflags:>02b}_{loflags:>06b}"
+        name = f"col_{surface}_{hiflags:>02b}_{loflags:>06b}_{bitmask:>04b}"
         # re-use existing material with matching name, if any
         if (mat := bpy.data.materials.get(name)) is not None:
             return mat
-        # TODO: try lookup first
         mat = bpy.data.materials.new(name)
         # if available, assign a color
+        if (col := material_color(surface=surface, bitmask=bitmask)) is not None:
+            mat.diffuse_color = col[:]+(1.0,)
         # TODO: customisable colors?
-        try:
-            mat.diffuse_color = config.SURFACE_COLORS[surface][:]+(1.0,)
-        except KeyError:
-            pass
         # TODO: visualise the flags in the material somehow?
         # we use custom properties as defined below for FlatOut 2 specific data
         mat.fo2.collision_surface = surface
         mat.fo2.collision_flags = [flags & (1 << b) != 0 for b in range(8)]
+        # TODO I might be better off mapping these to layers instead of materials
+        mat.fo2.collision_bitmask = [
+            bitmask & (1 << b) != 0 for b in range(cdb2.LEAF_MASK_BITS)]
         return mat
 
     @staticmethod
@@ -562,24 +581,25 @@ class MeshMaterialManager:
     def __init__(self, mesh: bpy.types.Mesh, material_manager: MaterialManager) -> None:
         self._mesh = mesh
         self._material_manager = material_manager
-        self._materials: Dict[PackedMaterial, int] = {}
+        self._materials: Dict[Tuple[PackedMaterial, int], int] = {}
 
-    def fetch(self, packed_material: PackedMaterial) -> int:
+    def fetch(self, packed_material: PackedMaterial, bitmask: int) -> int:
         """
         If the mesh already uses this material, returns its index.
         Otherwise, uses the MaterialManager to get or create the material,
         adds it to the mesh's materials, and returns its new index.
         """
         try:
-            return self._materials[packed_material]
+            return self._materials[(packed_material, bitmask)]
         except KeyError:
-            mat = self._material_manager.get_or_create(packed_material)
+            mat = self._material_manager.get_or_create(
+                packed_material, bitmask)
             assert mat is not None
             # I don't really understand how adding new materials in Blender works
             # Apparently the object material slots get created automatically
             # as materials get added to the object's mesh.
             idx = len(self._mesh.materials)
-            self._materials[packed_material] = idx
+            self._materials[(packed_material, bitmask)] = idx
             self._mesh.materials.append(mat)
             return idx
 
@@ -865,7 +885,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
 
             # set up materials
             material_indices = [
-                mesh_material_manager.fetch(t.flags) for t in triangles]
+                mesh_material_manager.fetch(t.flags, node.bitmask) for t in triangles]
             all_flags.update(map(lambda t: t.flags, triangles))
 
             if enable_debug_visualization:
