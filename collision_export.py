@@ -3,7 +3,7 @@ reload_modules(locals(), __package__, ["cdb2", "config", "collision_mesh"], [".b
 
 from .bitmath import ones
 from dataclasses import dataclass
-from typing import Callable, Dict, Generator, Iterable, List, NewType, Optional, Set, Tuple, Union, cast
+from typing import Callable, Dict, Generator, Iterable, Iterator, List, NewType, Optional, Set, Tuple, Union, cast
 from .geometry import AABB, Axis, BoundKind, vector_abs, vector_max, vector_min
 from .list import LinkedList
 from . import cdb2, collision_mesh, config
@@ -111,8 +111,7 @@ class VertexEncoder:
         self._mapping: Dict[vec3_scaled, int] = {}
         self._vertices: List[vec3_scaled] = []
 
-    def upsert(self, world_vert: Vector) -> int:
-        scaled_vert = self._scale_vert(world_vert)
+    def upsert(self, scaled_vert: Vector) -> int:
         try:
             return self._mapping[scaled_vert]
         except KeyError:
@@ -125,7 +124,8 @@ class VertexEncoder:
     def vertices(self) -> List[vec3_scaled]:
         return self._vertices
 
-    def _scale_vert(self, vert: Vector) -> vec3_scaled:
+    def scale_vert(self, vert: Vector) -> vec3_scaled:
+        # TODO move this out of here, it no longer belongs here
         res = vec3_scaled(
             tuple(round(self._axis_multipliers[i]*vert[i]) for i in range(3)))
         # sanity check: ensure we're within the valid range
@@ -144,6 +144,7 @@ def triangle_area(a: Vector, b: Vector, c: Vector) -> float:
 class Triangle:
     # the data relevant for writing the file
     collision: collision_mesh.Triangle
+    bitmask: int  # 4 bits
     # the cached bounding box, which is used for building the collision tree
     aabb: AABB
     # Mutable partition flag.
@@ -157,15 +158,16 @@ class TriangleEncoder:
         self._vertex_encoder = vertex_encoder
         self._tris: List[Triangle] = []
 
-    def append(self, verts: Tuple[Vector, Vector, Vector], flags: collision_mesh.PackedMaterial) -> bool:
+    def append(self, verts: Tuple[Vector, Vector, Vector], flags: collision_mesh.PackedMaterial, bitmask: int) -> bool:
         """
         Encodes a triangle into the fixed-point coordinate system used by the file.
         Returns whether the triangle was valid.
         Degenerate triangles (i.e. with collinear vertices) are invalid and get dropped.
         This can happen due to the rounding involved in quantizing the coordinates.
         """
+        scaled_verts = [self._vertex_encoder.scale_vert(v) for v in verts]
         vert_indices: Tuple[int, int, int] = tuple(
-            self._vertex_encoder.upsert(v) for v in verts)
+            self._vertex_encoder.upsert(v) for v in scaled_verts)
         degenerate = triangle_area(
             *(Vector(self._vertex_encoder.vertices[idx]) for idx in vert_indices)) == 0
         if degenerate:
@@ -173,8 +175,14 @@ class TriangleEncoder:
             # Ideally, those insertions should be rolled back, or we may save unused vertices.
             # But that should be relative harmless, and the situation should be avoided anyway.
             return False
-        self._tris.append(Triangle(collision=collision_mesh.Triangle(
-            flags=flags, vert_indices=vert_indices), aabb=AABB.around(verts)))
+        self._tris.append(Triangle(
+            collision=collision_mesh.Triangle(
+                flags=flags,
+                vert_indices=vert_indices,
+            ),
+            aabb=AABB.around(scaled_verts),
+            bitmask=encode_bitarray(bitmask),
+        ))
         return True
 
     @property
@@ -188,13 +196,19 @@ class DegenerateTriangle:
     polygon_index: int
 
 
-def encode_flags(surface: int, flags: Iterable[bool]) -> collision_mesh.PackedMaterial:
-    packed_flags = 0
+def encode_bitarray(flags: Iterable[bool]) -> int:
+    res = 0
     for i, f in enumerate(flags):
         if f:
-            packed_flags |= 1 << i
+            res |= 1 << i
+    return res
+
+
+def encode_flags(surface: int, flags: Iterable[bool]) -> collision_mesh.PackedMaterial:
+    packed_flags = encode_bitarray(flags)
     loflags = packed_flags & ones(6)
     hiflags = (packed_flags >> 6)
+    # convert back from 1-based surfaces.bed index to 0-based
     return collision_mesh.PackedMaterial((surface - 1) | (loflags << 8) | (hiflags << 8+8))
 
 
@@ -207,12 +221,12 @@ def encode_triangles(axis_multipliers: Vector, collision_meshes: Iterable[bpy.ty
         for tri in mesh.loop_triangles:
             mat: bpy.types.Material = mesh.materials[tri.material_index]
             assert len(tri.vertices) == 3
-            # convert back from 1-based surfaces.bed index to 0-based
             ok = triangle_encoder.append(
                 verts=tuple(obj.matrix_world @
                             mesh.vertices[idx].co for idx in tri.vertices),
                 flags=encode_flags(
                     surface=mat.fo2.collision_surface, flags=mat.fo2.collision_flags),
+                bitmask=mat.fo2.collision_bitmask,
             )
             if not ok:
                 degenerates.append(DegenerateTriangle(
@@ -341,6 +355,8 @@ class Leaf:
 
     index: int
 
+    bitmask: int  # 4 bits
+
     @property
     def depth(self) -> int:
         return 1
@@ -371,6 +387,11 @@ class InnerNode:
     index: int
 
     @property
+    def bitmask(self) -> int:
+        # TODO: this might be worth caching? Measure.
+        return self.inside_lower_bound.bitmask | self.inside_upper_bound.bitmask
+
+    @property
     def depth(self) -> int:
         return max(self.inside_lower_bound.depth, self.inside_upper_bound.depth) + 1
 
@@ -399,12 +420,60 @@ class InnerNode:
 Node = Union[Leaf, InnerNode]
 
 
+def build_leaf_by_bitmask(index: int, next_index: Callable[[], int], sorted_tris: SortedTriangles, aabb: AABB):
+    """
+    This function conceptually creates a leaf node containing the given sorted_tris,
+    but it first partitions the triangles by bitmask as that is saved on node level.
+    If the triangles have differing bitmasks, new InnerNodes are created
+    to narrow it down to a single bitmask, without shrinking the AABB.
+    """
+    # partition based on bitmask
+    axis = Axis.X
+    tris_view = sorted_tris.by_axis_and_bound(axis, BoundKind.LOWER)
+    first = next(iter(tris_view))
+    for tri in tris_view:
+        # We extract one bitmask at a time,
+        # which causes the tree to degenerate into a linked list,
+        # but keeps this simple.
+        # We don't expect more than 3 distinct bitmasks anyway.
+        tri.extract = tri.bitmask == first.bitmask
+    extracted = sorted_tris.extract_marked().by_axis_and_bound(axis, BoundKind.LOWER)
+
+    if len(sorted_tris) == 0:
+        # uniform bitmask, we're safe to create a Leaf
+        return Leaf(tris=extracted, index=index, bitmask=first.bitmask)
+
+    # we need to create an inner node
+    # but we create a simplified degenerate node
+    # where both children inherit the full AABB
+    # (TODO: for efficiency, we could re-calculate the AABB & bounds)
+    # and we just use it to narrow down the bitmask
+
+    # the encoding requires the children to have consecutive indices
+    idx0 = next_index()
+    idx1 = next_index()
+
+    # the order of these is determined by the encoding, i.e. fixed
+    bitmask_leaf = Leaf(tris=extracted, index=idx0, bitmask=first.bitmask)
+    remaining = build_leaf_by_bitmask(
+        idx1, next_index, sorted_tris, aabb)
+    return InnerNode(
+        axis=axis,
+        inside_upper_bound=bitmask_leaf,
+        # for simplicity, we retain the original bounds
+        upper_bound=aabb.bound(axis=axis, bound_kind=BoundKind.UPPER),
+        inside_lower_bound=remaining,
+        lower_bound=aabb.bound(axis=axis, bound_kind=BoundKind.LOWER),
+        index=index,
+    )
+
+
 def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTriangles, aabb: AABB) -> Node:
     """
     .. image:: collision_export_tri_partition_algo.jpg
     """
     if len(sorted_tris) <= config.FORCE_LEAF_THRESHOLD:
-        return Leaf(tris=sorted_tris, index=index)
+        return build_leaf_by_bitmask(index=index, next_index=next_index, sorted_tris=sorted_tris, aabb=aabb)
 
     @dataclass
     class PivotCandidate:
@@ -453,7 +522,7 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
                 score=score(pivot, inverse_pivot)
             )
 
-        tri_iter = iter(enumerate(tris))
+        tri_iter: Iterator[Tuple[int, Triangle]] = iter(enumerate(tris))
         # For the elements before the pivot, we have to accumulate the inverse bound,
         # a running extremum.
         # For the elements after the pivot, we can use the bound of the first element,
@@ -510,7 +579,7 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
     ):
         # TODO collect statistics to optimise the heuristic
         # print(f"early leaf with {len(sorted_tris)} tris")
-        return Leaf(tris=sorted_tris, index=index)
+        return build_leaf_by_bitmask(index=index, next_index=next_index, sorted_tris=sorted_tris, aabb=aabb)
 
     assert 0 < best.pivot.index < prev_len, \
         f"pivot index {best.pivot.index} violates 0 < index < len ({prev_len})"
@@ -556,6 +625,114 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
     )
 
 
+def encode_inner_node(node: InnerNode) -> bytes:
+    # TODO verify if it's upper or lower
+    child0_offset = node.inside_upper_bound.index * cdb2.NODE_SIZE
+    assert child0_offset <= ones(cdb2.INNER_NODE_CHILD_OFS_BITS), \
+        "generated tree too large, simplify your scene"
+
+    lo = child0_offset & ones(cdb2.INNER_NODE_CHILD_OFS_BITS)
+    lo <<= cdb2.INNER_NODE_MASK_BITS
+    lo |= node.bitmask | ones(cdb2.INNER_NODE_MASK_BITS)
+    lo <<= cdb2.AXIS_BITS
+    assert node.axis.value <= ones(cdb2.AXIS_BITS)
+    assert node.axis.value != cdb2.LEAF_AXIS
+    lo |= node.axis.value & ones(cdb2.AXIS_BITS)
+
+    # TODO verify order
+    encoded_node = struct.pack(
+        "<I2h", lo, node.lower_bound, node.upper_bound)
+    assert len(encoded_node) == cdb2.NODE_SIZE, \
+        f"Node size {len(encoded_node)} unexpected, want {cdb2.NODE_SIZE}"
+    return encoded_node
+
+
+class BitEncoder:
+    def __init__(self, destination: bytearray) -> None:
+        self._dest = destination
+        # number of unwritten bits left in accumulator
+        self._bits = 0
+        self._accum = 0
+        # total number of complete bytes written to destination
+        self._written = 0
+
+    def write(self, data: int, bits: int) -> None:
+        self._accum |= data << self._bits
+        self._bits += bits
+        while self._bits >= 8:
+            self._dest.append(self._accum & ones(8))
+            self._written += 1
+            self._accum >>= 8
+            self._bits -= 8
+
+    def reset_written(self, want_written: int) -> None:
+        assert self._written == want_written, \
+            f"want {want_written} bytes written, got {self._written}"
+        assert self._bits == 0, \
+            f"unexpected {self._bits} unwritten bits"
+        self._written = 0
+
+
+def encode_leaf_and_write_tri_data(leaf: Leaf, tri_data: bytearray) -> bytes:
+    tri_ofs = len(tri_data)
+    # TODO: implement additional kinds for more efficient tri packing
+    kind = 0
+    tri_count = len(leaf.tris)
+    enc = BitEncoder(tri_data)
+
+    it = iter(leaf.tris)
+    tri = next(it)
+    flags = tri.collision.flags & ones(6)
+    enc.write(tri.collision.flags >> 8 & ones(6), 6)
+    enc.write(tri.collision.flags >> 16 & ones(2), 2)
+    vert_ofs = tri.collision.vert_indices[0]
+    enc.write(tri.collision.vert_indices[1], 19)
+    enc.write(tri.collision.vert_indices[2], 21)
+    enc.reset_written(6)
+
+    for tri in it:
+        enc.write(tri.collision.flags >> 8 & ones(6), 6)
+        enc.write(tri.collision.flags >> 16 & ones(2), 2)
+        enc.write(tri.collision.flags & ones(6), 6)
+        enc.write(0, 1)
+        enc.write(tri.collision.vert_indices[0], 19)
+        enc.write(tri.collision.vert_indices[1], 19)
+        enc.write(tri.collision.vert_indices[2], 19)
+        enc.reset_written(9)
+
+    assert tri_ofs <= ones(cdb2.LEAF_TRIANGLE_OFS_BITS), \
+        "too much triangle data, simplify your scene"
+    lo = tri_ofs & ones(cdb2.LEAF_TRIANGLE_OFS_BITS)
+
+    lo <<= cdb2.LEAF_KIND_BITS
+    lo |= kind & ones(cdb2.LEAF_KIND_BITS)
+
+    lo <<= cdb2.LEAF_MASK_BITS
+    assert leaf.bitmask <= ones(cdb2.LEAF_MASK_BITS), \
+        "bitmasks must not exceed {cdb2.LEAF_MASK_BITS} bits"
+    lo |= leaf.bitmask & ones(cdb2.LEAF_MASK_BITS)
+
+    lo <<= cdb2.AXIS_BITS
+    lo |= cdb2.LEAF_AXIS
+
+    assert vert_ofs <= ones(cdb2.LEAF_VERTEX_OFS_BITS), \
+        "too much vertex data, simplify your scene"
+    hi = vert_ofs & ones(cdb2.LEAF_VERTEX_OFS_BITS)
+
+    hi <<= cdb2.LEAF_FLAGS_BITS
+    assert flags <= ones(cdb2.LEAF_FLAGS_BITS), \
+        f"flags > {ones(cdb2.LEAF_FLAGS_BITS)}"
+    hi |= flags & ones(cdb2.LEAF_FLAGS_BITS)
+
+    hi <<= cdb2.LEAF_TRIANGLE_COUNT_BITS
+    # if this happens, the algorithm building the tree didn't recurse deep enough
+    assert tri_count <= ones(cdb2.LEAF_TRIANGLE_COUNT_BITS), \
+        "logic error: too many triangles on a leaf"
+    hi |= tri_count & ones(cdb2.LEAF_TRIANGLE_COUNT_BITS)
+
+    return struct.pack("<2I", lo, hi)
+
+
 def export_file(report: report_func, path: str) -> None:
     print(f"export to \"{path}\"")
 
@@ -584,6 +761,7 @@ def export_file(report: report_func, path: str) -> None:
     aabb = tris[0].aabb.copy()
     for tri in tris[1:]:
         aabb.extend(tri.aabb)
+
     sorted_tris = SortedTriangles(by_axis_and_bound=tuple(
         tuple(
             # By pre-sorting, we can later iterate through all possible partitions along this axis and bound in one linear pass.
@@ -628,14 +806,37 @@ def export_file(report: report_func, path: str) -> None:
         node == None for node in flattened_nodes), "flattened nodes have gaps"
     flattened_nodes = cast(List[Node], flattened_nodes)
 
-    with open(path, mode="rw") as f:
+    encoded_nodes = bytearray()
+    tri_data = bytearray()
+    for node in flattened_nodes:
+        if isinstance(node, InnerNode):
+            encoded_nodes.extend(encode_inner_node(node))
+        else:
+            assert isinstance(node, Leaf)
+            encoded_nodes.extend(encode_leaf_and_write_tri_data(
+                cast(Leaf, node), tri_data))
+
+    with open(path, mode="wb") as f:
         # magic header (pretty sure this only marks the file type)
         f.write(b"\x21\x76\x71\x98")
         f.write(b"\x00\x00\x00\x00")
         f.write(struct.pack("<3i", *(round(v) for v in aabb.min)))
         f.write(struct.pack("<3i", *(round(v) for v in aabb.max)))
-        f.write(struct.pack("<3f", *axis_multipliers))
         f.write(struct.pack("<3f", *(1/v for v in axis_multipliers)))
+        f.write(struct.pack("<3f", *axis_multipliers))
+        node_len = cdb2.NODE_SIZE * len(flattened_nodes)
+        f.write(struct.pack("<I", node_len))
+        tri_len = len(tri_data)
+        f.write(struct.pack("<I", node_len + tri_len))
+        assert f.tell(
+        ) == cdb2.HEADER_SIZE, f"header length {f.tell()} should be {cdb2.HEADER_SIZE}"
+
+        f.write(encoded_nodes)
+        f.write(tri_data)
+        for vert in verts:
+            # TODO verify flipping is required here, but I do it on import, so probably
+            f.write(struct.pack("<3h", vert[2], vert[1], vert[0]))
+    print("export successful")
 
 
 class ExportOperator(bpy.types.Operator):

@@ -199,7 +199,7 @@ class Node:
     @property
     def is_leaf(self) -> bool:
         """Axis 0-2 are inner nodes, axis 3 marks leafs."""
-        return self.axis == 3
+        return self.axis == cdb2.LEAF_AXIS
 
     @property
     def children(self) -> Tuple[int, int]:

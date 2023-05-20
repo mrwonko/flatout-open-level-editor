@@ -93,7 +93,9 @@ class AABB:
         return self.min if bound_kind == BoundKind.LOWER else self.max
 
     def bound(self, axis: Axis, bound_kind: BoundKind) -> int:
-        return self.bounds(bound_kind)[axis.value]
+        # I kind of feel like this is the wrong place to round,
+        # but I think Vector just isn't meant for ints...
+        return round(self.bounds(bound_kind)[axis.value])
 
     def length_on(self, axis: Axis) -> int:
         return self.max[axis.value] - self.min[axis.value]
