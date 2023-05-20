@@ -9,6 +9,7 @@ from .list import LinkedList
 from . import cdb2, collision_mesh, config
 from mathutils import Vector
 import bpy
+import struct
 
 
 class ExportError(RuntimeError):
@@ -625,6 +626,16 @@ def export_file(report: report_func, path: str) -> None:
         flattened_nodes[node.index] = node
     assert not any(
         node == None for node in flattened_nodes), "flattened nodes have gaps"
+    flattened_nodes = cast(List[Node], flattened_nodes)
+
+    with open(path, mode="rw") as f:
+        # magic header (pretty sure this only marks the file type)
+        f.write(b"\x21\x76\x71\x98")
+        f.write(b"\x00\x00\x00\x00")
+        f.write(struct.pack("<3i", *(round(v) for v in aabb.min)))
+        f.write(struct.pack("<3i", *(round(v) for v in aabb.max)))
+        f.write(struct.pack("<3f", *axis_multipliers))
+        f.write(struct.pack("<3f", *(1/v for v in axis_multipliers)))
 
 
 class ExportOperator(bpy.types.Operator):
