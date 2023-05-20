@@ -838,6 +838,9 @@ def export_file(report: report_func, path: str) -> None:
             # TODO verify flipping is required here, but I do it on import, so probably
             f.write(struct.pack("<3h", vert[2], vert[1], vert[0]))
     print("export successful")
+    report(
+        {'INFO'},
+        "Export complete")
 
 
 class ExportOperator(bpy.types.Operator):
