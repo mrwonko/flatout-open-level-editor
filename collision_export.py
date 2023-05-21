@@ -615,14 +615,14 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
 
     axis = best.axis
     if best.bound_kind == BoundKind.LOWER:
-        lower_bound = best.pivot.inverse_pivot
+        lower_bound = best.pivot.pivot
         tris_inside_lower_bound = extracted
-        upper_bound = best.pivot.pivot
+        upper_bound = best.pivot.inverse_pivot
         tris_inside_upper_bound = sorted_tris
     else:
-        lower_bound = best.pivot.pivot
+        lower_bound = best.pivot.inverse_pivot
         tris_inside_lower_bound = sorted_tris
-        upper_bound = best.pivot.inverse_pivot
+        upper_bound = best.pivot.pivot
         tris_inside_upper_bound = extracted
 
     # the encoding requires the children to have consecutive indices
@@ -676,7 +676,7 @@ def encode_inner_node(node: InnerNode) -> bytes:
 
     # TODO verify order
     encoded_node = struct.pack(
-        "<I2h", lo, node.lower_bound, node.upper_bound)
+        "<I2h", lo, node.upper_bound, node.lower_bound)
     assert len(encoded_node) == cdb2.NODE_SIZE, \
         f"Node size {len(encoded_node)} unexpected, want {cdb2.NODE_SIZE}"
     return encoded_node
