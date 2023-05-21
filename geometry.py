@@ -76,6 +76,12 @@ class AABB:
             min=vector_min(self.min, other.min),
         )
 
+    def contains(self, other: "AABB") -> bool:
+        for axis in range(3):
+            if self.min[axis] > other.min[axis] or self.max[axis] < other.max[axis]:
+                return False
+        return True
+
     @staticmethod
     def around(coordinates: Iterable[Vector]) -> "AABB":
         if len(coordinates) == 0:

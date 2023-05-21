@@ -62,3 +62,7 @@ MAX_LEAF_SCORE = -1.5
 # i.e. both partitions (sub-trees) must contain at least this fraction of triangles.
 # This limits the maximum depth of the tree.
 MIN_PARTITION_RATIO = 0.25
+
+# For debugging: checks bounds for correctness on each step while building the tree.
+# Very expensive.
+VERIFY_TREE_BOUNDS = False

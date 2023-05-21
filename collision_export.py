@@ -629,11 +629,27 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
     idx0 = next_index()
     idx1 = next_index()
 
+    upper_aabb = aabb.with_bound(axis, BoundKind.UPPER, upper_bound)
+    lower_aabb = aabb.with_bound(axis, BoundKind.LOWER, lower_bound)
+    if config.VERIFY_TREE_BOUNDS:
+        for name, sub_tris, sub_aabb in [
+            ("upper", tris_inside_upper_bound, upper_aabb),
+            ("lower", tris_inside_lower_bound, lower_aabb),
+        ]:
+            ideal_aabb: Optional[AABB] = None
+            for tri in sub_tris.by_axis_and_bound(Axis.X, BoundKind.LOWER):
+                if ideal_aabb == None:
+                    ideal_aabb = tri.aabb.copy()
+                else:
+                    ideal_aabb.extend(tri.aabb)
+            if ideal_aabb is not None:
+                assert sub_aabb.contains(ideal_aabb), \
+                    f"AABB mismatch for {index=} {name}:\n{sub_aabb=} does not contain\n{ideal_aabb=}\n{best=}"
     # the order of these is determined by the encoding, i.e. fixed
     subtree_inside_upper_bound = build_tree(idx0, next_index, tris_inside_upper_bound,
-                                            aabb.with_bound(axis, BoundKind.UPPER, upper_bound))
+                                            upper_aabb)
     subtree_inside_lower_bound = build_tree(idx1, next_index, tris_inside_lower_bound,
-                                            aabb.with_bound(axis, BoundKind.LOWER, lower_bound))
+                                            lower_aabb)
     return InnerNode(
         axis=axis,
         inside_upper_bound=subtree_inside_upper_bound,
