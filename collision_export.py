@@ -110,6 +110,7 @@ def calculate_axis_multipliers(report: report_func, collision_meshes: Iterable[b
     max_abs_bounds = check_coordinate_space_utilization(
         report=report,
         bounds=bounds)
+    # FIXME divide by zero
     return Vector(z_up_to_y_up([MAX_ABS_COORDINATE/e for e in max_abs_bounds]))
 
 
@@ -661,7 +662,6 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
 
 
 def encode_inner_node(node: InnerNode) -> bytes:
-    # TODO verify if it's upper or lower
     child0_offset = node.inside_upper_bound.index * cdb2.NODE_SIZE
     assert child0_offset <= ones(cdb2.INNER_NODE_CHILD_OFS_BITS), \
         "generated tree too large, simplify your scene"
@@ -674,7 +674,6 @@ def encode_inner_node(node: InnerNode) -> bytes:
     assert node.axis.value != cdb2.LEAF_AXIS
     lo |= node.axis.value & ones(cdb2.AXIS_BITS)
 
-    # TODO verify order
     encoded_node = struct.pack(
         "<I2h", lo, node.upper_bound, node.lower_bound)
     assert len(encoded_node) == cdb2.NODE_SIZE, \
