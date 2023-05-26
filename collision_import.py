@@ -4,6 +4,7 @@ reload_modules(locals(), __package__, ["cdb2", "config"], [".geometry", ".bitmat
 import bpy
 import io
 from dataclasses import dataclass
+from enum import Enum
 import mathutils
 import os
 import struct
@@ -505,13 +506,48 @@ def material_properties_draw_func(self: bpy.types.Panel, context: bpy.types.Cont
         box.prop(ob.active_material.fo2, "collision_bitmask")
 
 
-def material_color(surface: int, bitmask: int) -> Optional[mathutils.Color]:
+class MaterialColorKind(Enum):
+    SURFACE_RAINBOW = 1
+    SURFACE_FIXED = 2
+    BITMASK_DERIVED = 3
+    BITMASK_FIXED = 4
+    FLAGS_1_TO_6 = 5
+    FLAGS_1_TO_8 = 6
+    FLAGS_HUE_VALUE = 7
+
+
+def material_color(kind: MaterialColorKind, surface: int, bitmask: int, flags: int) -> Optional[mathutils.Color]:
     try:
-        return config.BITMASK_COLORS[bitmask]
-        return config.SURFACE_COLORS[surface]
+        if kind == MaterialColorKind.SURFACE_RAINBOW:
+            color = mathutils.Color()
+            color.hsv = (surface / ones(6), 1, 1)
+            return color
+        elif kind == MaterialColorKind.SURFACE_FIXED:
+            return config.SURFACE_COLORS[surface]
+        elif kind == MaterialColorKind.BITMASK_DERIVED:
+            color = mathutils.Color(
+                ((bitmask >> 3) & 1, (bitmask >> 1) & 1, bitmask & 1))
+            # use remaining bit for brightness, but from 50%-100% instead 0%-100%
+            color.v = 0.5 + ((bitmask >> 2) & 1) / 2
+            return color
+        elif kind == MaterialColorKind.BITMASK_FIXED:
+            return config.BITMASK_COLORS[bitmask]
+        elif kind == MaterialColorKind.FLAGS_1_TO_6:
+            color = mathutils.Color()
+            color.hsv = (0, 0, (flags & ones(6)) / ones(6))
+            return color
+        elif kind == MaterialColorKind.FLAGS_1_TO_8:
+            color = mathutils.Color()
+            color.hsv = (0, 0, flags / ones(8))
+            return color
+        elif kind == MaterialColorKind.FLAGS_HUE_VALUE:
+            color = mathutils.Color()
+            color.hsv = ((flags >> 6) / ones(2), 1,
+                         (flags & ones(6)) / ones(6))
+            return color
+        return None
     except KeyError:
         return mathutils.Color((0.3, 0.3, 0.3))
-        return None
 
 
 class MaterialManager:
@@ -523,15 +559,15 @@ class MaterialManager:
         self._materials: Dict[Tuple[PackedMaterial, int],
                               bpy.types.Material] = {}
 
-    def get_or_create(self, packed_material: PackedMaterial, bitmask: int) -> bpy.types.Material:
+    def get_or_create(self, kind: MaterialColorKind, packed_material: PackedMaterial, bitmask: int) -> bpy.types.Material:
         try:
             return self._materials[(packed_material, bitmask)]
         except KeyError:
-            mat = self._create(packed_material, bitmask)
+            mat = self._create(kind, packed_material, bitmask)
             self._materials[(packed_material, bitmask)] = mat
             return mat
 
-    def _create(self, packed_material: PackedMaterial, bitmask: int) -> bpy.types.Material:
+    def _create(self, kind: MaterialColorKind, packed_material: PackedMaterial, bitmask: int) -> bpy.types.Material:
         # we're using Lua-style 1-based indices here to match the indices in surfaces.bed
         surface = (packed_material & ones(6)) + 1
         loflags = (packed_material >> 8) & ones(6)
@@ -545,10 +581,8 @@ class MaterialManager:
             return mat
         mat = bpy.data.materials.new(name)
         # if available, assign a color
-        if (col := material_color(surface=surface, bitmask=bitmask)) is not None:
+        if (col := material_color(kind=kind, surface=surface, bitmask=bitmask, flags=flags)) is not None:
             mat.diffuse_color = col[:]+(1.0,)
-        # TODO: customisable colors?
-        # TODO: visualise the flags in the material somehow?
         # we use custom properties as defined below for FlatOut 2 specific data
         mat.fo2.collision_surface = surface
         mat.fo2.collision_flags = [flags & (1 << b) != 0 for b in range(8)]
@@ -583,7 +617,7 @@ class MeshMaterialManager:
         self._material_manager = material_manager
         self._materials: Dict[Tuple[PackedMaterial, int], int] = {}
 
-    def fetch(self, packed_material: PackedMaterial, bitmask: int) -> int:
+    def fetch(self, kind: MaterialColorKind, packed_material: PackedMaterial, bitmask: int) -> int:
         """
         If the mesh already uses this material, returns its index.
         Otherwise, uses the MaterialManager to get or create the material,
@@ -593,7 +627,7 @@ class MeshMaterialManager:
             return self._materials[(packed_material, bitmask)]
         except KeyError:
             mat = self._material_manager.get_or_create(
-                packed_material, bitmask)
+                kind, packed_material, bitmask)
             assert mat is not None
             # I don't really understand how adding new materials in Blender works
             # Apparently the object material slots get created automatically
@@ -604,7 +638,7 @@ class MeshMaterialManager:
             return idx
 
 
-def import_file(filename: str, enable_debug_visualization: bool = False):
+def import_file(filename: str, material_color_kind: MaterialColorKind, enable_debug_visualization: bool = False):
     file_stats = os.stat(filename)
     file_size = file_stats.st_size
     with open(filename, "rb") as f:
@@ -885,7 +919,7 @@ def import_file(filename: str, enable_debug_visualization: bool = False):
 
             # set up materials
             material_indices = [
-                mesh_material_manager.fetch(t.flags, node.bitmask) for t in triangles]
+                mesh_material_manager.fetch(material_color_kind, t.flags, node.bitmask) for t in triangles]
             all_flags.update(map(lambda t: t.flags, triangles))
 
             if enable_debug_visualization:
@@ -950,10 +984,38 @@ class ImportOperator(bpy.types.Operator):
     enable_debug_visualization: bpy.props.BoolProperty(
         name="Debug Visualization", description="Imports the collision tree. The tree is automatically rebuilt on export, this is only for debugging.", default=False)
 
+    material_color_kind: bpy.props.EnumProperty(
+        name="Material Color",
+        description="How should the color for the generated materials be chosen? This is purely visual, and irrelevant for the export.",
+        items=[
+            (MaterialColorKind.SURFACE_RAINBOW.name, "Surface Rainbow",
+             "Select hue based on surface index, which references surfaces.bed",
+             MaterialColorKind.SURFACE_RAINBOW.value),
+            (MaterialColorKind.SURFACE_FIXED.name, "Surface Hand Selection",
+             "Use manually chosen colors by surface ID. Not all surface IDs supported", MaterialColorKind.SURFACE_FIXED.value),
+            (MaterialColorKind.BITMASK_DERIVED.name, "Bitmask Derived",
+             "Derive colors from the collision filter mask bits, which are used for filtering",
+             MaterialColorKind.BITMASK_DERIVED.value),
+            (MaterialColorKind.BITMASK_FIXED.name, "Bitmask Hand Selection",
+             "Use hand-picked colors for certain the collision filter mask bits, which are used for filtering",
+             MaterialColorKind.BITMASK_FIXED.value),
+            (MaterialColorKind.FLAGS_1_TO_6.name, "Flags 1-6",
+             "Select value based on integer interpretation of the lowest 6 flags", MaterialColorKind.FLAGS_1_TO_6.value),
+            (MaterialColorKind.FLAGS_1_TO_8.name, "Flags 1-8",
+             "Select value based on integer interpretation of the flags", MaterialColorKind.FLAGS_1_TO_8.value),
+            (MaterialColorKind.FLAGS_HUE_VALUE.name, "Flags Hue+Value",
+             "Select value based on integer interpretation of the lowest 6 flags, and hue based on the other 2",
+             MaterialColorKind.FLAGS_HUE_VALUE.value),
+        ],
+        default=MaterialColorKind.SURFACE_RAINBOW.value,
+    )
+
     def execute(self, context):
-        import_file(self.properties.filepath,
-                    enable_debug_visualization=self.properties.enable_debug_visualization)
-        # self.report( { 'ERROR' }, f'import of {self.properties.filepath} not yet implemented')
+        import_file(
+            self.properties.filepath,
+            material_color_kind=MaterialColorKind[self.properties.material_color_kind],
+            enable_debug_visualization=self.properties.enable_debug_visualization,
+        )
         return {'FINISHED'}
 
     def invoke(self, context, event):
