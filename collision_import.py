@@ -224,6 +224,7 @@ class Node:
 
     @property
     def leaf_kind(self) -> int:
+        """Only for leafs: Describes which of the 6 triangle encodings is used."""
         assert self.is_leaf, 'only leafs have kinds'
         return self._kind
 
@@ -327,8 +328,6 @@ def generate_debug_visualisation(collection: bpy.types.Collection, nodes: List[N
     """
     Visualises the AABB collision tree using a hierarchy of mesh objects.
     As a side-effect, Node.debug_parent may be set on the incoming nodes.
-
-    FIXME: the result is wrong somehow. The AABBs don't _quite_ match the tris within.
     """
     def depth(node: Node) -> int:
         if node.is_leaf:
