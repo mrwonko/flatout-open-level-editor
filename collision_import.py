@@ -860,7 +860,7 @@ def import_file(filename: str, material_color_kind: MaterialColorKind, enable_de
                 triangles.append(Triangle(
                     # 6 + 6 + 1 bit
                     flags=PackedMaterial(
-                        node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) & ones(1)) >> 6) << 8+8),
+                        node.leaf_flags | (get(0) & ones(6)) << 8 | ((get(0) >> 6) & ones(1)) << 8+8),
                     vert_indices=(
                         # 12 bit
                         vert_offset + \
