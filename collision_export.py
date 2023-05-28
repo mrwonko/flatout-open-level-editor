@@ -1,12 +1,11 @@
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["cdb2", "config", "collision_mesh"], [".bitmath", ".geometry", ".list"])  # nopep8
+reload_modules(locals(), __package__, ["cdb2", "config", "collision_mesh"], [".bitmath", ".geometry"])  # nopep8
 
 from .bitmath import ones
 from dataclasses import dataclass
 import time
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, NewType, Optional, Set, Tuple, TypeVar, Union, cast
 from .geometry import AABB, Axis, BoundKind, vector_abs, vector_max, vector_min
-from .list import DoubleBufferedList
 from . import cdb2, collision_mesh, config
 from mathutils import Vector
 import bpy
@@ -322,9 +321,9 @@ while unpartitioned triangles remain:
 
 class SortedTriangles:
     def __init__(self, by_axis_and_bound: Tuple[
-        Tuple[DoubleBufferedList[Triangle], DoubleBufferedList[Triangle]],
-        Tuple[DoubleBufferedList[Triangle], DoubleBufferedList[Triangle]],
-        Tuple[DoubleBufferedList[Triangle], DoubleBufferedList[Triangle]],
+        Tuple[List[Triangle], List[Triangle]],
+        Tuple[List[Triangle], List[Triangle]],
+        Tuple[List[Triangle], List[Triangle]],
     ]) -> None:
         """
         The same triangles sorted by their bounds along each axis.
@@ -345,17 +344,22 @@ class SortedTriangles:
     def by_axis_and_bound(self, axis: Axis, bound_kind: BoundKind) -> List[Triangle]:
         return self.__by_axis_and_bound[axis.value][bound_kind.value]
 
-    def extract_marked(self, count: int) -> "SortedTriangles":
+    def extract_marked(self) -> "SortedTriangles":
         """
         Extracts all triangles marked with extract=True, removing them from this index.
         """
         old_len = len(self)
         extracted = SortedTriangles(
             by_axis_and_bound=tuple(
-                tuple(tris.extract(lambda tri: tri.extract, count)
+                tuple([tri for tri in tris if tri.extract]
                       for tris in by_bound)
                 for by_bound in self.__by_axis_and_bound
             ),
+        )
+        self.__by_axis_and_bound = tuple(
+            tuple([tri for tri in tris if not tri.extract]
+                  for tris in by_bound)
+            for by_bound in self.__by_axis_and_bound
         )
         assert len(self) + len(extracted) == old_len
         return extracted
@@ -452,17 +456,13 @@ def build_leaf_by_bitmask(index: int, next_index: Callable[[], int], sorted_tris
     axis = Axis.X
     tris_view = sorted_tris.by_axis_and_bound(axis, BoundKind.LOWER)
     first = next(iter(tris_view))
-    num_marked = 0
     for tri in tris_view:
         # We extract one bitmask at a time,
         # which causes the tree to degenerate into a linked list,
         # but keeps this simple.
         # We don't expect more than 3 distinct bitmasks anyway.
         tri.extract = tri.bitmask == first.bitmask
-        if tri.extract:
-            num_marked += 1
-    extracted = sorted_tris.extract_marked(
-        num_marked).by_axis_and_bound(axis, BoundKind.LOWER)
+    extracted = sorted_tris.extract_marked().by_axis_and_bound(axis, BoundKind.LOWER)
 
     if len(sorted_tris) == 0:
         # uniform bitmask, we're safe to create a Leaf
@@ -610,13 +610,10 @@ def build_tree(index: int, next_index: Callable[[], int], sorted_tris: SortedTri
         f"pivot index {best.pivot.index} violates 0 < index < len ({prev_len})"
 
     # mark selected triangles for extraction...
-    num_marked = 0
     for i, tri in enumerate(sorted_tris.by_axis_and_bound(best.axis, best.bound_kind)):
         tri.extract = i >= best.pivot.index
-        if tri.extract:
-            num_marked += 1
     # ... and extract them
-    extracted = sorted_tris.extract_marked(num_marked)
+    extracted = sorted_tris.extract_marked()
     assert len(sorted_tris) == best.pivot.index, \
         f"expected cut at element {best.pivot.index}/{prev_len}, not {len(sorted_tris)}"
     assert len(sorted_tris) < prev_len
@@ -811,14 +808,14 @@ def export_file(report: report_func, path: str) -> None:
             # By pre-sorting, we can later iterate through all possible partitions along this axis and bound in one linear pass.
             # We store the result in a linked list, because we can partition that without any allocations while retaining its order,
             # so we can recursively partition the list into a tree.
-            DoubleBufferedList.of(sorted(
+            sorted(
                 tris,
                 key=lambda tri: (
                     tri.aabb.bound(axis, bound_kind),
                     tri.aabb.bound(axis, bound_kind.inverse)
                 ),
                 reverse=bound_kind == BoundKind.UPPER,
-            ))
+            )
             for bound_kind in BoundKind
         )
         for axis in Axis
