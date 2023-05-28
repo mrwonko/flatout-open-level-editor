@@ -1,12 +1,11 @@
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["cdb2", "config", "collision_mesh"], [".bitmath", ".geometry", ".list"])  # nopep8
+reload_modules(locals(), __package__, ["cdb2", "config", "collision_mesh"], [".bitmath", ".geometry"])  # nopep8
 
 from .bitmath import ones
 from dataclasses import dataclass
 import time
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, NewType, Optional, Set, Tuple, TypeVar, Union, cast
 from .geometry import AABB, Axis, BoundKind, vector_abs, vector_max, vector_min
-from .list import LinkedList
 from . import cdb2, collision_mesh, config
 from mathutils import Vector
 import bpy
@@ -322,9 +321,9 @@ while unpartitioned triangles remain:
 
 class SortedTriangles:
     def __init__(self, by_axis_and_bound: Tuple[
-        Tuple[LinkedList[Triangle], LinkedList[Triangle]],
-        Tuple[LinkedList[Triangle], LinkedList[Triangle]],
-        Tuple[LinkedList[Triangle], LinkedList[Triangle]],
+        Tuple[List[Triangle], List[Triangle]],
+        Tuple[List[Triangle], List[Triangle]],
+        Tuple[List[Triangle], List[Triangle]],
     ]) -> None:
         """
         The same triangles sorted by their bounds along each axis.
@@ -342,7 +341,7 @@ class SortedTriangles:
                     assert l == len(tris), ""
         self.__by_axis_and_bound = by_axis_and_bound
 
-    def by_axis_and_bound(self, axis: Axis, bound_kind: BoundKind) -> LinkedList[Triangle]:
+    def by_axis_and_bound(self, axis: Axis, bound_kind: BoundKind) -> List[Triangle]:
         return self.__by_axis_and_bound[axis.value][bound_kind.value]
 
     def extract_marked(self) -> "SortedTriangles":
@@ -352,10 +351,15 @@ class SortedTriangles:
         old_len = len(self)
         extracted = SortedTriangles(
             by_axis_and_bound=tuple(
-                tuple(tris.extract(lambda tri: tri.extract)
+                tuple([tri for tri in tris if tri.extract]
                       for tris in by_bound)
                 for by_bound in self.__by_axis_and_bound
             ),
+        )
+        self.__by_axis_and_bound = tuple(
+            tuple([tri for tri in tris if not tri.extract]
+                  for tris in by_bound)
+            for by_bound in self.__by_axis_and_bound
         )
         assert len(self) + len(extracted) == old_len
         return extracted
@@ -364,7 +368,7 @@ class SortedTriangles:
         # the lengths of all elements ought to be identical
         return len(self.by_axis_and_bound(Axis.X, BoundKind.LOWER))
 
-    def __iter__(self) -> Generator[Tuple[Axis, BoundKind, LinkedList[Triangle]], None, None]:
+    def __iter__(self) -> Generator[Tuple[Axis, BoundKind, List[Triangle]], None, None]:
         for axis in Axis:
             for bound_kind in BoundKind:
                 yield axis, bound_kind, self.by_axis_and_bound(axis, bound_kind)
@@ -372,7 +376,7 @@ class SortedTriangles:
 
 @dataclass
 class Leaf:
-    tris: LinkedList[Triangle]
+    tris: Iterable[Triangle]
 
     index: int
 
@@ -804,14 +808,14 @@ def export_file(report: report_func, path: str) -> None:
             # By pre-sorting, we can later iterate through all possible partitions along this axis and bound in one linear pass.
             # We store the result in a linked list, because we can partition that without any allocations while retaining its order,
             # so we can recursively partition the list into a tree.
-            LinkedList.of(sorted(
+            sorted(
                 tris,
                 key=lambda tri: (
                     tri.aabb.bound(axis, bound_kind),
                     tri.aabb.bound(axis, bound_kind.inverse)
                 ),
                 reverse=bound_kind == BoundKind.UPPER,
-            ))
+            )
             for bound_kind in BoundKind
         )
         for axis in Axis
