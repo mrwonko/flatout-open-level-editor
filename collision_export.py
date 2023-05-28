@@ -3,6 +3,7 @@ reload_modules(locals(), __package__, ["cdb2", "config", "collision_mesh"], [".b
 
 from .bitmath import ones
 from dataclasses import dataclass
+import time
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, NewType, Optional, Set, Tuple, TypeVar, Union, cast
 from .geometry import AABB, Axis, BoundKind, vector_abs, vector_max, vector_min
 from .list import LinkedList
@@ -824,8 +825,10 @@ def export_file(report: report_func, path: str) -> None:
         res = __next_index
         __next_index += 1
         return res
+    before = time.monotonic_ns()
     root = build_tree(next_index(), next_index, sorted_tris, aabb)
-    print("built tree")
+    duration_ns = time.monotonic_ns() - before
+    print(f"built tree in {duration_ns / 1_000_000_000}s")
     num_leafs = 0
     leaf_tris = 0
     for leaf in root.leafs:
