@@ -1,5 +1,5 @@
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["cdb2", "config"], [".geometry", ".bitmath", ".collision_mesh"])  # nopep8
+reload_modules(locals(), __package__, ["cdb2", "config"], [".geometry", ".bitmath", ".collision_mesh", ".shadowmap_import"])  # nopep8
 
 import bpy
 import io
@@ -13,6 +13,7 @@ from . import cdb2, config
 from .geometry import AABB
 from .bitmath import ones
 from .collision_mesh import PackedMaterial, Triangle
+from .shadowmap_import import import_shadowmap
 
 
 @dataclass
@@ -186,7 +187,7 @@ class Node:
             self.bitmask = lo & ones(cdb2.INNER_NODE_MASK_BITS)
             lo >>= cdb2.INNER_NODE_MASK_BITS
             child0_offset = lo
-            assert child0_offset % cdb2.NODE_SIZE == 0,\
+            assert child0_offset % cdb2.NODE_SIZE == 0, \
                 f'unexpected node offset {child0_offset} is not a multiple of {cdb2.NODE_SIZE}'
             self._child0_index = child0_offset // cdb2.NODE_SIZE
             self._max: int
@@ -637,7 +638,12 @@ class MeshMaterialManager:
             return idx
 
 
-def import_file(filename: str, material_color_kind: MaterialColorKind, enable_debug_visualization: bool = False):
+def import_file(
+        filename: str,
+        material_color_kind: MaterialColorKind,
+        enable_debug_visualization: bool = False,
+        with_shadowmap: bool = False,
+):
     file_stats = os.stat(filename)
     file_size = file_stats.st_size
     with open(filename, "rb") as f:
@@ -951,6 +957,13 @@ def import_file(filename: str, material_color_kind: MaterialColorKind, enable_de
         obj: bpy.types.Object = bpy.data.objects.new(f"collision", mesh)
         collision_collection.objects.link(obj)
 
+    # shadowmap import is done from here because we suspect that it is tied to the collision coordinate system,
+    # in which case we'll need data from the header. But analysis of that is incomplete.
+    if with_shadowmap:
+        import_shadowmap(filename=os.path.join(
+            os.path.dirname(filename),
+            '..', 'lighting', 'shadowmap_w2.dat'))
+
     # debug print for me, the developer :)
     # possibly reference to global/dynamics/surfaces.bed? (1-49)
     material_byte0s: Set[int] = set()
@@ -980,12 +993,15 @@ class ImportOperator(bpy.types.Operator):
     filepath: bpy.props.StringProperty(
         name="File Path", description="File path used for importing the track_cdb2.gen file", maxlen=1024, default="")
 
+    import_shadowmap: bpy.props.BoolProperty(
+        name="Shadowmap", description="Imports the ../lighting/shadowmap_w2.dat file. There's an export bug that causes the car's brightness to be incorrect, maybe this can help understand it. Only loads the image, does not (yet) place it in the level", default=False)
+
     enable_debug_visualization: bpy.props.BoolProperty(
-        name="Debug Visualization", description="Imports the collision tree. The tree is automatically rebuilt on export, this is only for debugging.", default=False)
+        name="Debug Visualization", description="Imports the collision tree. The tree is automatically rebuilt on export, this is only for debugging", default=False)
 
     material_color_kind: bpy.props.EnumProperty(
         name="Material Color",
-        description="How should the color for the generated materials be chosen? This is purely visual, and irrelevant for the export.",
+        description="How should the color for the generated materials be chosen? This is purely visual, and irrelevant for the export",
         items=[
             (MaterialColorKind.SURFACE_RAINBOW.name, "Surface Rainbow",
              "Select hue based on surface index, which references surfaces.bed",
@@ -1014,6 +1030,7 @@ class ImportOperator(bpy.types.Operator):
             self.properties.filepath,
             material_color_kind=MaterialColorKind[self.properties.material_color_kind],
             enable_debug_visualization=self.properties.enable_debug_visualization,
+            with_shadowmap=self.properties.import_shadowmap,
         )
         return {'FINISHED'}
 
