@@ -956,6 +956,15 @@ def import_file(
         # TODO: I could create one face map for each flag, to more easily see faces with each flag
         obj: bpy.types.Object = bpy.data.objects.new(f"collision", mesh)
         collision_collection.objects.link(obj)
+    # create bounding box as an empty with box display
+    bounds_obj: bpy.types.Object = bpy.data.objects.new(
+        "collision_bounds", None)
+    bounds_obj.empty_display_type = "CUBE"
+    bounds_obj.scale = y_up_to_z_up(
+        # technically, negative numbers go one further than positive ones, but I'd rather keep the object origin-aligned
+        scale_to_blender((1 << 15, 1 << 15, 1 << 15), header.axis_multipliers)
+    )
+    collision_collection.objects.link(bounds_obj)
 
     # shadowmap import is done from here because we suspect that it is tied to the collision coordinate system,
     # in which case we'll need data from the header. But analysis of that is incomplete.
